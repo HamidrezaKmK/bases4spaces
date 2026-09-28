@@ -1,0 +1,22 @@
+# Lean install for fpca.py + notebooks/fpca_1d.ipynb (subset of environment.yml).
+# Install:  uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.9.1
+torchvision==0.24.1
+numpy
+scipy
+matplotlib
+pillow
+tqdm
+pyyaml
+hydra-core
+omegaconf
+wandb
+datasets
+scikit-learn
+jupyterlab
+ipykernel
+nbformat
+nbclient
+matplotlib-inline
+pytest
