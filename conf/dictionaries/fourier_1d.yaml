@@ -1,0 +1,4 @@
+_target_: infidictionary.dictionaries.FourierDictionary
+domain_dim: 1
+num_channels: 1
+steepness: 2.0
