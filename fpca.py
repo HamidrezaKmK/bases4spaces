@@ -41,21 +41,20 @@ def train(
     grad_accumulation_steps: int,
     n_epochs_mean_function: int | None,
     num_atoms: int,
+    rank: int,
     checkpointer: Checkpointer | None,
     checkpoint: dict | None,
     max_grad_norm: float | None = None,
 ):
     neural_isometry = neural_isometry.to(device)
     mean_function = mean_function.to(device)
-    # Dictionaries such as Fourier/Haar/Voronoi can own a learned synthesis
-    # module; leaving it on CPU here restores its momentum buffers on CPU and
-    # later conflicts with CUDA parameters after atom evaluation.
     initial_dictionary = initial_dictionary.to(device)
 
     # The fixed, ordered K-prefix e_1..e_K pushed through the isometry every step,
-    # and the PMF weights of its captured energy.
-    prefix_idx = initial_dictionary.get_top_indices(num_atoms).to(device)
-    prefix_pmfs = initial_dictionary.get_index_pmfs(prefix_idx).to(device)
+    # and the PMF weights of its captured energy. The first R of them build the
+    # rotations, so the prefix must be at least R long.
+    assert num_atoms >= rank, f"num_atoms (K={num_atoms}) must be >= rank (R={rank})"
+    prefix_pmfs = initial_dictionary.get_prefix_pmfs(num_atoms).to(device)
 
     optim_isometry.zero_grad()
     optim_mean_function.zero_grad()
@@ -92,8 +91,8 @@ def train(
             # score the zero-centered data by its PMF-weighted captured energy.
             vals_centered = (vals - avg_vals.unsqueeze(0)).detach()  # shape (B, N, C)
             logabsdet = torch.zeros(coords.shape[0], device=coords.device)
-            atoms_initial = initial_dictionary.get_atoms(coords, prefix_idx)  # (K, N, C)
-            _, _, atoms = neural_isometry.pushforward(coords, logabsdet, atoms_initial)
+            atoms_initial = initial_dictionary.get_prefix(coords, num_atoms)  # (K, N, C)
+            _, _, atoms = neural_isometry.pushforward(coords, logabsdet, atoms_initial, rank=rank)
             # Tripwire: the pushforward must preserve the weighted L² norm. If it
             # stops doing so the energy objective can win by amplifying rather
             # than by learning, which the energy curve alone will not reveal.
@@ -121,8 +120,6 @@ def train(
             wandb.log({"train_stats/avg_lr_isometry": get_avg_lr(optim_isometry)}, step=epoch_i)
             # Numerical health of the isometry. isometry_ratio must stay at 1.0.
             wandb.log({"numerics/isometry_ratio": isometry_ratio}, step=epoch_i)
-            for name, value in neural_isometry.pop_diagnostics().items():
-                wandb.log({f"numerics/{name}": value}, step=epoch_i)
 
         pbar.set_postfix({'energy': energy_item, 'mean_function_mse': mean_mse_item})
         if max_grad_norm is not None:
@@ -203,11 +200,7 @@ def main(conf: DictConfig):
         isometry_scheduler_callable = instantiate(conf.isometry_scheduler_callable)
     else:
         isometry_scheduler_callable = None
-    isometry_and_dictionary_parameters = [
-        *neural_isometry.parameters(),
-        *initial_dictionary.parameters(),
-    ]
-    optim_isometry = isometry_optimizer_callable(isometry_and_dictionary_parameters)
+    optim_isometry = isometry_optimizer_callable(neural_isometry.parameters())
     scheduler_isometry = isometry_scheduler_callable(optim_isometry) if isometry_scheduler_callable is not None else None
 
     optim_mean_function = mean_function_optimizer_callable(mean_function.parameters())
@@ -236,7 +229,7 @@ def main(conf: DictConfig):
 
     if checkpoint is not None and "initial_dictionary" not in checkpoint.get("models", {}):
         raise ValueError(
-            "This checkpoint predates dictionary-synthesis checkpointing and cannot "
+            "This checkpoint predates dictionary checkpointing and cannot "
             "be resumed. Start a new FPCA run."
         )
 
@@ -246,6 +239,7 @@ def main(conf: DictConfig):
             mean_function=mean_function,
             initial_dictionary=initial_dictionary,
             num_atoms=conf.num_atoms,
+            rank=conf.rank,
             f_gen=function_generator,
             batch_size=conf.batch_size,
             n_epochs=conf.n_epochs,

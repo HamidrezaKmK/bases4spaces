@@ -31,7 +31,6 @@ ood_label: "MNIST test split"
 # ── Isometry ──────────────────────────────────────────────────────────────────
 neural_isometry:
   channels_dim: 1        # grayscale: 1 output channel
-  rank: 20
 
 # ── Fourier dictionary: 1 channel ─────────────────────────────────────────────
 initial_dictionary:
@@ -62,6 +61,7 @@ mean_function_optimizer_callable:
 # ── Prefix basis ──────────────────────────────────────────────────────────────
 # Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
 num_atoms: 128
+rank: 20            # R mixing tokens: the first R prefix atoms build each layer's rotation
 
 # ── Checkpointing ─────────────────────────────────────────────────────────────
 checkpointing:

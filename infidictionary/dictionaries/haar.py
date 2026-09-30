@@ -1,10 +1,6 @@
 """Isotropic tensor-product Haar wavelet dictionary on ``[0, 1]^d``."""
 
-from typing import Iterator
-
 import torch
-import torch.nn as nn
-from torch.nn.utils.parametrizations import orthogonal
 
 from .base import InfiDictionary
 
@@ -19,16 +15,12 @@ class HaarWaveletDictionary(InfiDictionary):
     the remaining mass geometrically over wavelet levels.
     """
 
-    is_infinite = True
-
     def __init__(
         self,
         domain_dim: int,
         num_channels: int,
         scaling_mass: float = 0.5,
         level_decay: float = 0.5,
-        synthesis_tail_probability: float = 1e-4,
-        learn_synthesis: bool = True,
     ):
         super().__init__()
         if domain_dim < 1 or num_channels < 1:
@@ -37,96 +29,47 @@ class HaarWaveletDictionary(InfiDictionary):
             raise ValueError("scaling_mass must be in (0, 1)")
         if not 0.0 < level_decay < 1.0:
             raise ValueError("level_decay must be in (0, 1)")
-        if synthesis_tail_probability <= 0.0:
-            raise ValueError("synthesis_tail_probability must be positive for the infinite Haar prior")
         self.domain_dim = int(domain_dim)
         self.num_channels = int(num_channels)
         self.scaling_mass = float(scaling_mass)
         self.level_decay = float(level_decay)
-        self.synthesis_tail_probability = float(synthesis_tail_probability)
-        self.learn_synthesis = bool(learn_synthesis)
-        self._device = torch.device("cpu")
-        self._synthesis_indices = self.get_high_probability_indices(synthesis_tail_probability)
-        self._synthesis = self._build_synthesis(self._synthesis_indices.shape[0])
 
     @property
     def _index_width(self) -> int:
         return self.domain_dim + 3
 
-    def _build_synthesis(self, size: int) -> nn.Module | None:
-        if size == 0:
-            return None
-        layer = nn.Linear(size, size, bias=False)
-        with torch.no_grad():
-            if self.learn_synthesis:
-                q, r = torch.linalg.qr(torch.randn(size, size, dtype=layer.weight.dtype))
-                signs = torch.sign(torch.diagonal(r)).masked_fill(torch.diagonal(r) == 0, 1)
-                layer.weight.copy_(q * signs[None, :])
-            else:
-                layer.weight.copy_(torch.eye(size, dtype=layer.weight.dtype))
-        layer = orthogonal(layer)
-        if not self.learn_synthesis:
-            for parameter in layer.parameters():
-                parameter.requires_grad_(False)
-        return layer
-
-    def _move_to(self, device: torch.device) -> None:
-        if self._device != device:
-            self._synthesis_indices = self._synthesis_indices.to(device)
-            if self._synthesis is not None:
-                self._synthesis.to(device)
-            self._device = device
-
     def _wavelet_pmf(self, level: torch.Tensor) -> torch.Tensor:
         count = self.num_channels * (2 ** self.domain_dim - 1) * (2 ** (self.domain_dim * level))
         return ((1.0 - self.scaling_mass) * (1.0 - self.level_decay) * self.level_decay ** level) / count
 
-    def _base_atoms(self, coords: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-        A, N = idx.shape[0], coords.shape[0]
-        values = torch.zeros(A, N, self.num_channels, dtype=coords.dtype, device=coords.device)
+    def _atoms(self, coords: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+        idx = idx.to(coords.device)
         if idx.ndim != 2 or idx.shape[1] != self._index_width:
             raise ValueError(f"idx must have shape (A, {self._index_width})")
         level, shifts = idx[:, 0].long(), idx[:, 1:1 + self.domain_dim].long()
         orientation, channel = idx[:, -2].long(), idx[:, -1].long()
         valid_channel = (channel >= 0) & (channel < self.num_channels)
         scaling = (level == -1) & (shifts == 0).all(dim=1) & (orientation == 0) & valid_channel
-        if scaling.any():
-            rows = scaling.nonzero(as_tuple=False).squeeze(-1)
-            values[rows, :, channel[rows]] = 1.0
-        for row in ((level >= 0) & valid_channel).nonzero(as_tuple=False).flatten().tolist():
-            j = int(level[row])
-            cells = 2 ** j
-            orient = int(orientation[row])
-            if orient < 1 or orient >= 2 ** self.domain_dim or (shifts[row] < 0).any() or (shifts[row] >= cells).any():
-                continue
-            local = coords * cells - shifts[row].to(coords.dtype)
-            factor = torch.ones(N, dtype=coords.dtype, device=coords.device)
-            for axis in range(self.domain_dim):
-                inside = (local[:, axis] >= 0) & (local[:, axis] < 1)
-                if (orient >> axis) & 1:
-                    axis_value = torch.where(local[:, axis] < 0.5, 1.0, -1.0)
-                else:
-                    axis_value = torch.ones(N, dtype=coords.dtype, device=coords.device)
-                factor = factor * axis_value * inside
-            values[row, :, channel[row]] = factor * (cells ** (self.domain_dim / 2))
-        return values
+        # All atoms are evaluated in one batch (no per-atom Python loop or host
+        # syncs). Scaling atoms are the constant 1; a wavelet at level j is
+        # 2^(j d/2) times a product over axes of the indicator of its cell and,
+        # on the axes selected by the orientation bits, a ±1 Haar sign.
+        cells = torch.exp2(level.clamp(min=0).to(coords.dtype))                       # (A,)
+        local = coords[None] * cells[:, None, None] - shifts[:, None].to(coords.dtype)  # (A, N, d)
+        inside = ((local >= 0) & (local < 1)).all(dim=-1)                              # (A, N)
+        axis_bits = (orientation[:, None] >> torch.arange(self.domain_dim, device=idx.device)) & 1
+        signs = torch.where((local < 0.5) | (axis_bits[:, None, :] == 0), 1.0, -1.0).prod(dim=-1)
+        wavelet = (
+            (level >= 0) & valid_channel
+            & (orientation >= 1) & (orientation < 2 ** self.domain_dim)
+            & (shifts >= 0).all(dim=1) & (shifts < cells[:, None]).all(dim=1)
+        )
+        amplitude = torch.where(wavelet, cells ** (self.domain_dim / 2), scaling.to(coords.dtype))
+        factor = torch.where(wavelet[:, None], signs * inside, 1.0) * amplitude[:, None]  # (A, N)
+        channel_mask = channel[:, None] == torch.arange(self.num_channels, device=idx.device)
+        return factor[:, :, None] * channel_mask[:, None, :].to(coords.dtype)
 
-    def get_atoms(self, coords: torch.Tensor, idx: torch.Tensor, synthesis: bool = True) -> torch.Tensor:
-        self._move_to(coords.device)
-        idx = idx.to(coords.device)
-        values = self._base_atoms(coords, idx)
-        if not synthesis or self._synthesis is None or idx.shape[0] == 0:
-            return values
-        matches = (idx[:, None, :] == self._synthesis_indices[None, :, :]).all(dim=-1)
-        inside = matches.any(dim=1)
-        if inside.any():
-            positions = matches.long().argmax(dim=1)
-            block = self._base_atoms(coords, self._synthesis_indices)
-            mixed = self._synthesis.weight.to(coords.dtype)[positions[inside]] @ block.reshape(block.shape[0], -1)
-            values[inside] = mixed.reshape(inside.sum().item(), coords.shape[0], self.num_channels)
-        return values
-
-    def get_index_pmfs(self, idx: torch.Tensor) -> torch.Tensor:
+    def _index_pmfs(self, idx: torch.Tensor) -> torch.Tensor:
         idx = idx.to(torch.long)
         out = torch.zeros(idx.shape[0], dtype=torch.get_default_dtype(), device=idx.device)
         if idx.ndim != 2 or idx.shape[1] != self._index_width:
@@ -156,7 +99,7 @@ class HaarWaveletDictionary(InfiDictionary):
         channel = channels[None, None, :].expand(shifts.shape[0], len(orientations), -1).reshape(-1, 1)
         return torch.cat([torch.full((base.shape[0], 1), level), base, orient, channel], dim=1)
 
-    def get_high_probability_indices(self, tail_probability: float) -> torch.Tensor:
+    def _high_probability_indices(self, tail_probability: float) -> torch.Tensor:
         if tail_probability <= 0.0:
             raise ValueError("tail_probability must be positive for the infinite Haar prior")
         rows = []
@@ -169,17 +112,10 @@ class HaarWaveletDictionary(InfiDictionary):
             j += 1
         return torch.cat(rows, dim=0) if rows else torch.empty((0, self._index_width), dtype=torch.long)
 
-    def parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
-        return iter(()) if not self.learn_synthesis or self._synthesis is None else super().parameters(recurse=recurse)
-
     def save(self, path: str) -> None:
-        torch.save({"domain_dim": self.domain_dim, "num_channels": self.num_channels, "scaling_mass": self.scaling_mass, "level_decay": self.level_decay, "synthesis_tail_probability": self.synthesis_tail_probability, "learn_synthesis": self.learn_synthesis, "synthesis": None if self._synthesis is None else self._synthesis.state_dict()}, path)
+        """Save the constructor args; the dictionary has no learned state."""
+        torch.save({"domain_dim": self.domain_dim, "num_channels": self.num_channels, "scaling_mass": self.scaling_mass, "level_decay": self.level_decay}, path)
 
     @classmethod
     def load(cls, path: str, map_location=None) -> "HaarWaveletDictionary":
-        payload = torch.load(path, map_location=map_location, weights_only=False)
-        synthesis = payload.pop("synthesis")
-        obj = cls(**payload)
-        if synthesis is not None and obj._synthesis is not None:
-            obj._synthesis.load_state_dict(synthesis)
-        return obj
+        return cls(**torch.load(path, map_location=map_location, weights_only=False))

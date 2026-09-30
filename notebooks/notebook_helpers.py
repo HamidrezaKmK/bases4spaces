@@ -650,6 +650,7 @@ def show_scalar_2d(ax, xy, values, gridsize: int = 30, title: str | None = None,
 def visualize_mixing_layers(
     isometry,
     coords_vis,
+    rank: int,
     layers=None,
     *,
     channel: int = 0,
@@ -658,14 +659,15 @@ def visualize_mixing_layers(
 ):
     """Visualize each mixing layer: the functions ``u_r`` and the causal attention ``A``.
 
+    ``rank`` is the number of mixing tokens ``R`` the isometry is called with.
     One column per layer in ``layers`` (default: all). Rows ``0..trunc-1`` are
     the mixing functions ``u_r^(ℓ)`` on ``coords_vis``; the last row is the
     lower-triangular attention matrix ``A^(ℓ)`` that forms ``a_r = Σ_k A_rk e_k``.
     """
     with torch.no_grad():
-        states = isometry.layer_states(coords_vis)
+        states = isometry.layer_states(coords_vis, rank)
     layers = list(range(len(states))) if layers is None else list(layers)
-    rank = min(isometry.rank, trunc)
+    rank = min(rank, trunc)
     selected_channel = min(channel, isometry.channels_dim - 1)
     fig, axes = plt.subplots(
         rank + 1, len(layers), figsize=(4 * len(layers), 4 * (rank + 1)),

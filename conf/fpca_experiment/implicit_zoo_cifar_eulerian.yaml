@@ -31,7 +31,6 @@ ood_label: "CIFAR-10 eval split"
 # ── Isometry ──────────────────────────────────────────────────────────────────
 neural_isometry:
   channels_dim: 3        # RGB: 3 output channels
-  rank: 30
 
 # ── Fourier dictionary: 3 channels (R, G, B) ──────────────────────────────────
 initial_dictionary:
@@ -62,6 +61,7 @@ mean_function_optimizer_callable:
 # ── Prefix basis ──────────────────────────────────────────────────────────────
 # Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
 num_atoms: 512
+rank: 30            # R mixing tokens: the first R prefix atoms build each layer's rotation
 
 # ── Checkpointing ─────────────────────────────────────────────────────────────
 checkpointing:

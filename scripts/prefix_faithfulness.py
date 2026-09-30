@@ -1,12 +1,10 @@
 """Empirical check of prefix faithfulness for ``EulerianIsometry``.
 
-See ``.knowledge/sequence-models.md`` (section *Prefix faithfulness*). With the
-rank ``R`` fixed, pushing the Fourier prefix ``e_1..e_K`` through a randomly
+With the rank ``R`` fixed, pushing the Fourier prefix ``e_1..e_K`` through a randomly
 initialised isometry must give the same first ``K`` outputs for every
-``K >= R``. Changing ``R`` builds different rotations, so the outputs should
-change. For the ``R' > R`` model every parameter the two models share is copied
-over from the rank-``R`` model (``q0[:R]``, the field MLP, all layers), so the
-only difference is the ``R' - R`` extra mixing tokens.
+``K >= R``. ``R`` is a call argument of the isometry, so the ``R'`` runs use the
+very same model; changing ``R`` builds different rotations, so the outputs
+should change.
 
 Writes ``functions.png``, ``differences.png``, ``prefix_table.md`` and
 ``prefix_table.csv`` to ``--out`` and prints ``metric`` lines.
@@ -27,24 +25,13 @@ from infidictionary.networks import NerfConditionalField
 from infidictionary.neural_isometries import EulerianIsometry
 
 
-def build_isometry(rank: int, num_layers: int, seed: int) -> EulerianIsometry:
+def build_isometry(num_layers: int, seed: int) -> EulerianIsometry:
     torch.manual_seed(seed)
     field = lambda **kw: NerfConditionalField(activation=nn.SiLU, **kw)
     return EulerianIsometry(
-        coords_dim=1, channels_dim=1, rank=rank, num_layers=num_layers,
+        coords_dim=1, channels_dim=1, num_layers=num_layers,
         scalar_field_partial=field,
     ).double().eval()
-
-
-def copy_shared_parameters(src: EulerianIsometry, dst: EulerianIsometry) -> None:
-    """Copy every parameter of ``src`` into ``dst``; ``q0`` fills the first ``src.rank`` rows."""
-    dst_state = dst.state_dict()
-    for name, value in src.state_dict().items():
-        if name == "q0":
-            dst_state[name][: src.rank] = value
-        else:
-            dst_state[name] = value
-    dst.load_state_dict(dst_state)
 
 
 def main():
@@ -61,20 +48,17 @@ def main():
 
     coords = ((torch.arange(args.num_points, dtype=torch.float64) + 0.5) / args.num_points)[:, None]
     logabsdet = torch.zeros(args.num_points, dtype=torch.float64)
-    fourier = FourierDictionary(domain_dim=1, num_channels=1, learn_synthesis=False)
+    fourier = FourierDictionary(domain_dim=1, num_channels=1)
     K_max = Rp + 1
-    prefix = fourier.get_atoms(coords, fourier.get_top_indices(K_max)).double()  # (K_max, N, 1)
+    prefix = fourier.get_prefix(coords, K_max).double()  # (K_max, N, 1)
 
-    model_R = build_isometry(R, args.num_layers, args.seed)
-    model_Rp = build_isometry(Rp, args.num_layers, args.seed)
-    copy_shared_parameters(model_R, model_Rp)
+    model = build_isometry(args.num_layers, args.seed)
 
     configs = [(R, R), (R, R + 1), (R, R + 2), (Rp, Rp), (Rp, Rp + 1)]
     outputs = {}
     with torch.no_grad():
         for rank, K in configs:
-            model = model_R if rank == R else model_Rp
-            _, _, out = model.pushforward(coords, logabsdet, prefix[:K])
+            _, _, out = model.pushforward(coords, logabsdet, prefix[:K], rank=rank)
             outputs[(rank, K)] = out[..., 0]  # (K, N)
 
     def l2(f):  # empirical L² norm on the uniform grid, per function

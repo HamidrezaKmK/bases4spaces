@@ -29,7 +29,6 @@ function_generator:
 neural_isometry:
   channels_dim: 3
   # scalar_field_partial: null
-  rank: 10
 
 # Fourier dictionary: 3 output channels (R,G,B).  Atoms are indexed by
 # (k_1, k_2, c) — scalar spatial function phi_k active only in channel c.
@@ -49,6 +48,7 @@ checkpointing:
 
 # Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
 num_atoms: 4096
+rank: 10            # R mixing tokens: the first R prefix atoms build each layer's rotation
 n_epochs: 6000
 n_epochs_mean_function: null  # freeze mean function after this many epochs (null = never)
 batch_size: 16

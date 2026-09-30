@@ -23,6 +23,9 @@ isometry_scheduler_callable: null
 # Size K of the fixed, ordered dictionary prefix e_1..e_K pushed through the
 # isometry each step; its captured energy is weighted by the atom PMFs. K >= rank.
 num_atoms: 64
+# Number R of mixing tokens: the first R prefix atoms build each layer's rotation.
+# It is a call argument of the isometry, not part of the model.
+rank: 10
 
 wandb:
   tags:

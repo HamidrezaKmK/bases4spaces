@@ -12,7 +12,7 @@ pyyaml
 hydra-core
 omegaconf
 wandb
-datasets
+datasets>=5.0.1        # older releases use pyarrow.PyExtensionType, which recent pyarrow (e.g. 25) removed
 scikit-learn
 jupyterlab
 ipykernel

@@ -69,13 +69,14 @@ class _MixingLayer(nn.Module):
 class EulerianIsometry(NeuralIsometry):
     """Learned isometry of ``L²`` as a stack of causal sequence-mixing layers.
 
-    See ``.knowledge/sequence-models.md`` and *Learning Orthonormal Bases for
-    Function Spaces* (https://arxiv.org/abs/2605.19959).
+    Builds on *Learning Orthonormal Bases for Function Spaces*
+    (https://arxiv.org/abs/2605.19959).
 
     The input to :meth:`pushforward` is an *ordered prefix* of functions
-    ``e_1, …, e_K`` (``K >= R``), e.g. the top-``K`` atoms of a dictionary. Each
-    of the ``L`` layers is one exact rotation ``Q_ℓ`` applied to all ``K``
-    functions:
+    ``e_1, …, e_K`` (``K >= R``), e.g. the top-``K`` atoms of a dictionary. The
+    number of mixing tokens ``R`` is a call argument, not a constructor one: the
+    same parameters define a map for every ``R``. Each of the ``L`` layers is one
+    exact rotation ``Q_ℓ`` applied to all ``K`` functions:
 
     1. ``R`` mixing tokens ``q_r`` condition a shared field,
        ``u_r(x) = MLP(x, q_r)``.
@@ -90,11 +91,13 @@ class EulerianIsometry(NeuralIsometry):
     there and the Gram matrix of the functions is preserved *exactly*. See :meth:`_cayley_apply`
     for how the inverse collapses to a ``2R×2R`` solve.
 
-    The tokens are standard transformer residual streams: ``q^(0)`` is learned,
-    ``p^(0)_k`` is a sinusoidal encoding of ``k`` (it never reads ``e_k``), and
-    both are advanced by each layer. Every quantity a layer uses depends only on
-    ``e_1, …, e_R`` and indices ``<= R``, so the first ``K`` outputs do not
-    depend on how many further functions are appended (prefix faithfulness).
+    The tokens are standard transformer residual streams: ``q^(0)_r`` and
+    ``p^(0)_k`` are learned embeddings of the sinusoidal encodings of ``r`` and
+    ``k`` (neither reads ``e_k``), and both are advanced by each layer. For a
+    fixed ``R``, every quantity a layer uses depends only on ``e_1, …, e_R`` and
+    indices ``<= R``, so the first ``K`` outputs do not depend on how many
+    further functions are appended (prefix faithfulness). Changing ``R`` changes
+    the rotations.
 
     With ``gradient_checkpointing`` each layer is recomputed in the backward
     pass (``torch.utils.checkpoint``), so activation memory does not grow with
@@ -105,7 +108,6 @@ class EulerianIsometry(NeuralIsometry):
         self,
         coords_dim: int,
         channels_dim: int,
-        rank: int,
         num_layers: int,
         scalar_field_partial: Callable[[Dict[str, Any]], ConditionalField],
         d_model: int = 64,
@@ -116,8 +118,8 @@ class EulerianIsometry(NeuralIsometry):
         super().__init__()
         self.coords_dim = coords_dim
         self.channels_dim = channels_dim
-        self.rank = rank
         self.num_layers = num_layers
+        self.d_model = d_model
         self.gradient_checkpointing = gradient_checkpointing
 
         self.function_field = scalar_field_partial(
@@ -126,21 +128,22 @@ class EulerianIsometry(NeuralIsometry):
             rank=1,
             cond_dim=d_model,
         )
-        self.q0 = nn.Parameter(torch.randn(rank, d_model) / math.sqrt(d_model))
-        self.register_buffer("index_encoding", _index_encoding(rank, d_model), persistent=False)
+        self.q_embed = nn.Linear(d_model, d_model)
         self.p_embed = nn.Linear(d_model, d_model)
         self.layers = nn.ModuleList([_MixingLayer(d_model, n_heads, ffn_hidden) for _ in range(num_layers)])
 
-        J = torch.zeros(2 * rank, 2 * rank)
-        J[:rank, rank:] = torch.eye(rank)
-        J[rank:, :rank] = -torch.eye(rank)
-        self.register_buffer("J", J, persistent=False)
+    def _initial_tokens(self, rank: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """``q^(0)`` and ``p^(0)``, both ``(R, d_model)``, from the encodings of ``0..R-1``."""
+        device = self.q_embed.weight.device
+        encoding = _index_encoding(rank, self.d_model).to(device=device, dtype=self.q_embed.weight.dtype)
+        return self.q_embed(encoding), self.p_embed(encoding)
 
-        self._collect_diagnostics = False
-        self._diagnostics: dict[str, float] = {}
-
-    def _initial_tokens(self) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.q0, self.p_embed(self.index_encoding)
+    @staticmethod
+    def _skew_pairing(rank: int, like: torch.Tensor) -> torch.Tensor:
+        """``J = [[0, I], [-I, 0]]`` of size ``2R``, pairing ``u_r`` with ``a_r``."""
+        eye = torch.eye(rank, device=like.device, dtype=like.dtype)
+        zero = torch.zeros_like(eye)
+        return torch.cat([torch.cat([zero, eye], 1), torch.cat([-eye, zero], 1)], 0)
 
     def _mixing_functions(self, q: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
         """Evaluate ``u_r = MLP(·, q_r)`` for every token at every coordinate: ``(N, R, C)``."""
@@ -178,8 +181,7 @@ class EulerianIsometry(NeuralIsometry):
 
         so an operator on the sampled function space reduces to an ``S×S`` solve.
         ``I_S - G B'`` is always invertible: ``G`` is PSD and ``B'`` skew, so
-        ``G B'`` has purely imaginary spectrum. Passing ``-B`` gives the inverse
-        rotation.
+        ``G B'`` has purely imaginary spectrum.
         """
         N, S, _ = Phi.shape
         w = logabsdet.exp().to(Phi.dtype)
@@ -193,39 +195,30 @@ class EulerianIsometry(NeuralIsometry):
         tilde_c = torch.einsum("nrc,vnc,n->vr", Phi, y_pre, w) / N
         Msys = I_S - G @ B
         z = torch.linalg.solve(Msys, tilde_c.T).T @ B.T
-        y = y_pre + torch.einsum("nrc,vr->vnc", Phi, z)
-
-        if self._collect_diagnostics:
-            with torch.no_grad():
-                sv = torch.linalg.svdvals(Msys.float())
-                self._diagnostics["cond_msys"] = max(
-                    self._diagnostics.get("cond_msys", 0.0),
-                    (sv.amax() / sv.amin().clamp(min=1e-30)).item(),
-                )
-                self._diagnostics["min_eig_gram"] = min(
-                    self._diagnostics.get("min_eig_gram", float("inf")),
-                    torch.linalg.eigvalsh(G.float()).amin().item(),
-                )
-        return y
+        return y_pre + torch.einsum("nrc,vr->vnc", Phi, z)
 
     def _maybe_checkpoint(self, fn, *args):
         if self.gradient_checkpointing and self.training:
             return checkpoint(fn, *args, use_reentrant=False)
         return fn(*args)
 
-    def _check_prefix(self, functions: torch.Tensor, name: str) -> None:
-        assert functions.shape[0] >= self.rank, (
-            f"{name} must hold at least rank={self.rank} ordered functions (K >= R); "
+    @staticmethod
+    def _check_prefix(functions: torch.Tensor, rank: int) -> None:
+        assert rank >= 1, f"rank must be >= 1; got {rank}"
+        assert functions.shape[0] >= rank, (
+            f"the prefix must hold at least rank={rank} ordered functions (K >= R); "
             f"got K={functions.shape[0]}"
         )
 
-    def layer_states(self, coords: torch.Tensor) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    def layer_states(
+        self, coords: torch.Tensor, rank: int
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Per-layer attention ``A: (R, R)`` and mixing functions ``u: (N, R, C)``.
 
         The tokens never read the frame, so both depend on the parameters only;
         this is for inspection and plotting.
         """
-        q, p = self._initial_tokens()
+        q, p = self._initial_tokens(rank)
         states = []
         for layer in self.layers:
             A, q_next, p_next = layer(q, p)
@@ -233,82 +226,32 @@ class EulerianIsometry(NeuralIsometry):
             q, p = q_next, p_next
         return states
 
-    def pop_diagnostics(self) -> dict[str, float]:
-        """Return and clear the numerical diagnostics gathered since the last call.
-
-        Enables collection on first use, so a caller that never asks pays nothing.
-        """
-        self._collect_diagnostics = True
-        out, self._diagnostics = self._diagnostics, {}
-        return out
-
     def pushforward(
         self,
         src_coords: torch.Tensor,     # (N, d)
         src_logabsdet: torch.Tensor,  # (N,)
-        src_field: torch.Tensor,      # (K, N, C) ordered prefix, or (B, N, C) with ``frame``
-        frame: torch.Tensor | None = None,  # (K, N, C) ordered prefix the map is built from
+        src_field: torch.Tensor,      # (K, N, C) ordered prefix e_1..e_K of a basis
+        *,
+        rank: int,                    # R, the number of mixing tokens
         num_layers_to_apply: int | None = None,
     ):
-        """Map the ordered prefix ``e_1..e_K`` to ``T(e_1..e_K)``; requires ``K >= R``.
+        """Map the ordered prefix ``e_1..e_K`` to ``T_R(e_1..e_K)``; requires ``K >= R``.
 
-        Without ``frame``, ``src_field`` *is* the ordered prefix and its first
-        ``R`` rows build the rotations. With ``frame``, the rotations are built
-        from ``frame`` and applied to the arbitrary functions in ``src_field``;
-        by prefix faithfulness this is exactly the map ``frame`` is sent through.
+        ``src_field`` is always an ordered basis prefix; its first ``R`` rows
+        build the rotations, which are applied to all ``K`` rows.
         ``num_layers_to_apply`` stops after that many layers, for inspecting
         intermediate frames.
         """
-        if frame is not None:
-            self._check_prefix(frame, "frame")
-            stacked = torch.cat([frame[: self.rank], src_field], dim=0)
-            _, _, out = self.pushforward(
-                src_coords, src_logabsdet, stacked, num_layers_to_apply=num_layers_to_apply
-            )
-            return src_coords, src_logabsdet, out[self.rank:]
-
-        self._check_prefix(src_field, "src_field")
-        q, p = self._initial_tokens()
+        self._check_prefix(src_field, rank)
+        q, p = self._initial_tokens(rank)
+        J = self._skew_pairing(rank, src_field)
         y = src_field
 
         for layer in self.layers[:num_layers_to_apply]:
             def step(y, q, p, _layer=layer):
-                Phi, q, p = self._layer_factors(_layer, q, p, src_coords, y[: self.rank])
-                return self._cayley_apply(Phi, self.J, src_logabsdet, y), q, p
+                Phi, q, p = self._layer_factors(_layer, q, p, src_coords, y[:rank])
+                return self._cayley_apply(Phi, J, src_logabsdet, y), q, p
 
             y, q, p = self._maybe_checkpoint(step, y, q, p)
 
         return src_coords, src_logabsdet, y
-
-    def pullback(
-        self,
-        tgt_coords: torch.Tensor,     # (N, d)
-        tgt_logabsdet: torch.Tensor,  # (N,)
-        tgt_field: torch.Tensor,      # (B, N, C) arbitrary functions
-        frame: torch.Tensor,          # (K, N, C) the ordered prefix the map was built from
-        num_layers_to_apply: int | None = None,
-    ):
-        """Apply the inverse map ``Q_1⁻¹ ∘ … ∘ Q_L⁻¹`` to arbitrary functions.
-
-        The rotations depend on the frame, so the ordered prefix used by
-        :meth:`pushforward` must be supplied; only its first ``R`` rows matter.
-        """
-        self._check_prefix(frame, "frame")
-        q, p = self._initial_tokens()
-        e = frame[: self.rank]
-        factors = []
-
-        for layer in self.layers[:num_layers_to_apply]:
-            def frame_step(e, q, p, _layer=layer):
-                Phi, q, p = self._layer_factors(_layer, q, p, tgt_coords, e)
-                return self._cayley_apply(Phi, self.J, tgt_logabsdet, e), Phi, q, p
-
-            e, Phi, q, p = self._maybe_checkpoint(frame_step, e, q, p)
-            factors.append(Phi)
-
-        y = tgt_field
-        for Phi in reversed(factors):
-            y = self._maybe_checkpoint(
-                lambda y, Phi: self._cayley_apply(Phi, -self.J, tgt_logabsdet, y), y, Phi
-            )
-        return tgt_coords, tgt_logabsdet, y

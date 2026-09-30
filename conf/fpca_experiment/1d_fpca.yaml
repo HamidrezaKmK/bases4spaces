@@ -38,11 +38,10 @@ mean_function:
   coords_dim: 1
   output_dim: 1
 
-# ── Neural isometry (1-D, rank-30 Eulerian) ──────────────────────────────────
+# ── Neural isometry (1-D Eulerian) ─────────────────────────────────────────────
 neural_isometry:
   coords_dim: 1
   channels_dim: 1
-  rank: 30
 
 # ── Training ──────────────────────────────────────────────────────────────────
 n_epochs: 4000
@@ -52,6 +51,7 @@ max_grad_norm: 1.0
 
 # Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
 num_atoms: 64
+rank: 30            # R mixing tokens: the first R prefix atoms build each layer's rotation
 
 checkpointing:
   checkpoint_dir: outputs/checkpoints

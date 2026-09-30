@@ -1,135 +1,82 @@
 from abc import ABC, abstractmethod
-from typing import Iterator
 
 import torch
 import torch.nn as nn
 
-from infidictionary.utils import pairwise_inner_product
-
 
 class InfiDictionary(nn.Module, ABC):
-    """Abstract base class for dictionaries over a continuous domain.
+    """Abstract base class for infinite dictionaries over a continuous domain.
 
-    A dictionary is a collection of *atoms* — scalar- or vector-valued
-    functions on a continuous domain — equipped with a probability mass
-    function (PMF) over its index set.  The index set may be either
+    A dictionary is an infinite orthonormal family of *atoms* — scalar- or
+    vector-valued functions on a continuous domain — equipped with a
+    probability mass function (PMF) over its index set, e.g. the real Fourier
+    basis on ``[0,1]^d`` with a summable power-law prior over frequencies, or
+    the Haar wavelet basis with a geometric prior over levels. Dictionaries
+    are fixed: they own no learned parameters.
 
-    * **infinite** (e.g. the real Fourier basis on ``[0,1]^d``, with a
-      summable power-law prior over frequencies), or
-    * **finite** (e.g. a set of fixed resolution hat functions or Voronoi cell 
-      step functions).
+    A dictionary is only ever probed through its **ordered prefix**: the first
+    ``K`` atoms ``e_1, …, e_K`` by descending PMF, via :meth:`get_prefix` and
+    :meth:`get_prefix_pmfs`. Prefixes are nested — the first ``K`` atoms of the
+    ``K+1`` prefix are the ``K`` prefix — and ties in the PMF are broken by
+    the subclass's fixed enumeration order, so the ordering is deterministic.
 
-    Subclasses implement specific atom families and decide how the index set is
-    laid out, how atoms are evaluated, and what probability each index carries.
-    Everything beyond these core operations is dictionary-specific and lives on
-    the subclass.
-
-    Atoms are evaluated at a finite set of *coordinates* (quadrature points) and
-    are identified by integer *indices* whose meaning is dictionary-specific.
+    Subclasses implement the index-level primitives (:meth:`_atoms`,
+    :meth:`_index_pmfs`, :meth:`_high_probability_indices`); their index
+    layout is private to the subclass.
 
     Shape conventions used throughout:
-        B  — batch size (number of functions)
         N  — number of quadrature / sample points
         d  — spatial dimension of the domain
         C  — number of channels (output dimension of each function)
-        A  — number of atoms
+        K  — prefix length
     """
 
+    def __init__(self):
+        super().__init__()
+        self._prefix_cache: dict[int, torch.Tensor] = {}
+
     @abstractmethod
-    def get_atoms(
-        self,
-        coords: torch.Tensor, # (N, d)
-        idx: torch.Tensor, # (A, ...)
-        synthesis: bool = True,
-    ) -> torch.Tensor: # (A, N, C)
-        """Evaluate dictionary atoms at the given coordinates.
-
-        Args:
-            coords: Quadrature / sample points, shape ``(N, d)``.
-            idx: Integer indices selecting which atoms to evaluate,
-                shape ``(A, ...)``.  The inner dimensions are
-                dictionary-specific (e.g. ``(A, d)`` for multi-index atoms).
-            synthesis: Whether to apply the dictionary's optional synthesis
-                transform. ``False`` requests its raw/base atoms. Dictionaries
-                without a synthesis transform return the same atoms either way.
-
-        Returns:
-            Atom values at each coordinate, shape ``(A, N, C)``; entry
-            ``(i, j, c)`` is the ``j``-th evaluation of the ``i``-th atom on
-            channel ``c``.
-        """
+    def _atoms(self, coords: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+        """Evaluate the atoms selected by ``idx`` at ``coords``: ``(A, N, C)``."""
         raise NotImplementedError
 
     @abstractmethod
-    def get_index_pmfs(self, idx: torch.Tensor) -> torch.Tensor:
-        """Return the prior probability ``p(k)`` for each atom index.
-
-        Args:
-            idx: Integer indices, shape ``(A, ...)`` matching :meth:`get_atoms`.
-
-        Returns:
-            Probability tensor of shape ``(A,)``.
-        """
+    def _index_pmfs(self, idx: torch.Tensor) -> torch.Tensor:
+        """Prior probability of each atom index: ``(A,)``."""
         raise NotImplementedError
 
     @abstractmethod
-    def get_high_probability_indices(self, tail_probability: float) -> torch.Tensor:
-        """Return every atom index with PMF at least ``tail_probability``."""
+    def _high_probability_indices(self, tail_probability: float) -> torch.Tensor:
+        """Every atom index with PMF at least ``tail_probability``."""
         raise NotImplementedError
 
-    def get_top_indices(self, num_atoms: int) -> torch.Tensor:
-        """Return the ``num_atoms`` highest-PMF indices, ordered by descending PMF.
-
-        This is the ordered prefix ``e_1, …, e_K`` that is fed through the
-        isometry. Ties keep the order of :meth:`get_high_probability_indices`
-        (the sort is stable), so the prefix is deterministic.
-        """
+    def _prefix_indices(self, num_atoms: int) -> torch.Tensor:
+        """Indices of the ``num_atoms`` highest-PMF atoms, by descending PMF (cached)."""
         if num_atoms < 1:
             raise ValueError(f"num_atoms must be >= 1; got {num_atoms}")
-        tail_probability = 1e-2
-        idx = self.get_high_probability_indices(tail_probability)
-        while idx.shape[0] < num_atoms:
-            if tail_probability < 1e-30:
-                raise ValueError(
-                    f"dictionary has fewer than num_atoms={num_atoms} atoms with non-zero PMF"
-                )
-            tail_probability /= 4
-            idx = self.get_high_probability_indices(tail_probability)
-        pmfs = self.get_index_pmfs(idx)
-        order = torch.sort(pmfs, descending=True, stable=True).indices
-        return idx[order[:num_atoms].to(idx.device)]
+        if num_atoms not in self._prefix_cache:
+            # Every atom at or above the threshold is enumerated, so once the
+            # set holds K atoms its top K is the global top K.
+            tail_probability = 1e-2
+            idx = self._high_probability_indices(tail_probability)
+            while idx.shape[0] < num_atoms:
+                if tail_probability < 1e-30:
+                    raise ValueError(
+                        f"dictionary has fewer than num_atoms={num_atoms} atoms with non-zero PMF"
+                    )
+                tail_probability /= 4
+                idx = self._high_probability_indices(tail_probability)
+            order = torch.sort(self._index_pmfs(idx), descending=True, stable=True).indices
+            self._prefix_cache[num_atoms] = idx[order[:num_atoms].to(idx.device)]
+        return self._prefix_cache[num_atoms]
 
-    def get_reconstructions(
-        self,
-        coords: torch.Tensor,
-        functions: torch.Tensor,
-        atom_indices: torch.Tensor,
-        synthesis: bool = True,
-    ) -> torch.Tensor:
-        """Project ``functions`` onto selected synthesized or raw dictionary atoms."""
-        atoms = self.get_atoms(
-            coords,
-            atom_indices.to(coords.device),
-            synthesis=synthesis,
-        )
-        coefficients = pairwise_inner_product(functions, atoms)
-        return (coefficients @ atoms.reshape(atoms.shape[0], -1)).view_as(functions)
+    def get_prefix(self, coords: torch.Tensor, num_atoms: int) -> torch.Tensor:
+        """The first ``num_atoms`` atoms ``e_1..e_K`` evaluated at ``coords``: ``(K, N, C)``."""
+        return self._atoms(coords, self._prefix_indices(num_atoms).to(coords.device))
 
-    def parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
-        """Trainable parameters owned by the dictionary itself.
-
-        A dictionary with trainable overrides this to yield those 
-        parameters, so the training loop can hand them to the optimizer 
-        alongside the isometry's — letting the initial dictionary itself 
-        be learned jointly. This is mostly useful for linear synthesis
-        style mixing that can be learned, e.g. instead of using a fixed
-        Fourier basis, allow for a quadratic mixing of the Fourier bases.
-        """
-        return (
-            parameter
-            for parameter in super().parameters(recurse=recurse)
-            if parameter.requires_grad
-        )
+    def get_prefix_pmfs(self, num_atoms: int) -> torch.Tensor:
+        """PMF weights ``p_1 >= … >= p_K`` of the first ``num_atoms`` atoms: ``(K,)``."""
+        return self._index_pmfs(self._prefix_indices(num_atoms))
 
     def save(self, path: str) -> None:
         """Persist the state needed to rebuild this dictionary later."""

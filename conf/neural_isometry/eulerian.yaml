@@ -5,7 +5,6 @@ defaults:
 _target_: infidictionary.neural_isometries.EulerianIsometry
 coords_dim: 2
 channels_dim: 1
-rank: 10            # R mixing tokens per layer; the prefix fed in must have K >= R atoms
 num_layers: 8       # one Cayley rotation per transformer layer
 d_model: 64
 n_heads: 1          # attention A is the head-averaged weights
