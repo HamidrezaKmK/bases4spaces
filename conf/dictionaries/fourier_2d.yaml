@@ -1,0 +1,4 @@
+_target_: infidictionary.dictionaries.FourierDictionary
+domain_dim: 2
+num_channels: 1
+steepness: 2.0          # power-law exponent in (1+m²)^{-α}; need α > d/2
