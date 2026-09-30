@@ -168,7 +168,6 @@ def test_shared_nerf_fields_are_real_and_differentiable():
     conditional_field = NerfConditionalField(
         coords_dim=2,
         output_dim=3,
-        rank=2,
         cond_dim=5,
         hidden_dims=(8,),
         nerf_n_levels=2,
@@ -180,7 +179,7 @@ def test_shared_nerf_fields_are_real_and_differentiable():
     (mean.square().mean() + generated.square().mean()).backward()
 
     assert mean.shape == (12, 3) and not mean.is_complex()
-    assert generated.shape == (12, 2, 3) and not generated.is_complex()
+    assert generated.shape == (12, 3) and not generated.is_complex()
     assert coords.grad is not None
 
 

@@ -24,9 +24,10 @@ class ConditionalField(nn.Module, ABC):
     are never used interchangeably, so sharing a base only implied a
     substitutability that does not exist.
 
-    ``forward`` returns ``U`` of shape ``(N, R, C)``. ``cond_emb`` is
-    ``(N, emb_dim)``, pre-computed by the caller — a mixing-token embedding in
-    ``EulerianIsometry`` — and broadcast across the ``N`` coordinates in ``x``.
+    ``forward`` returns shape ``(N, C)``: row ``n`` is the field conditioned on
+    ``cond_emb[n]`` evaluated at ``x[n]``. ``cond_emb`` is ``(N, emb_dim)``,
+    pre-computed by the caller — in ``EulerianIsometry`` each row pairs one
+    coordinate with one mixing token, so one field yields every ``u_r``.
     """
 
     def __init__(self, input_dim: int, output_dim: int):

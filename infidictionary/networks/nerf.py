@@ -83,13 +83,12 @@ class NerfNeuralField(NeuralField):
 
 
 class NerfConditionalField(ConditionalField):
-    """Conditional NeRF field returning tensors with shape ``(N, R, C)``."""
+    """Conditional NeRF field returning tensors with shape ``(N, C)``."""
 
     def __init__(
         self,
         coords_dim: int,
         output_dim: int,
-        rank: int,
         cond_dim: int,
         hidden_dims: tuple = (256, 256, 256),
         activation=nn.SiLU,
@@ -99,11 +98,9 @@ class NerfConditionalField(ConditionalField):
         nerf_freq_max: float = 64.0,
     ):
         super().__init__(input_dim=coords_dim, output_dim=output_dim)
-        self.C = output_dim
-        self.R = rank
         self.backbone = _NerfBackbone(
             coords_dim=coords_dim,
-            output_dim=rank * output_dim,
+            output_dim=output_dim,
             cond_dim=cond_dim,
             hidden_dims=hidden_dims,
             activation=activation,
@@ -114,4 +111,4 @@ class NerfConditionalField(ConditionalField):
         )
 
     def forward(self, cond_emb: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
-        return self.backbone(coords, cond_emb).view(coords.shape[0], self.R, self.C)
+        return self.backbone(coords, cond_emb)

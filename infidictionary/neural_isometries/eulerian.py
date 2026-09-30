@@ -125,7 +125,6 @@ class EulerianIsometry(NeuralIsometry):
         self.function_field = scalar_field_partial(
             coords_dim=coords_dim,
             output_dim=channels_dim,
-            rank=1,
             cond_dim=d_model,
         )
         self.q_embed = nn.Linear(d_model, d_model)
@@ -150,7 +149,7 @@ class EulerianIsometry(NeuralIsometry):
         N, R = coords.shape[0], q.shape[0]
         cond = q.repeat_interleave(N, dim=0)            # (R·N, d_model)
         x = coords.repeat(R, 1)                         # (R·N, d)
-        u = self.function_field(cond, x).view(R, N, self.channels_dim)
+        u = self.function_field(cond, x).view(R, N, self.channels_dim)  # (R·N, C) → (R, N, C)
         return u.transpose(0, 1)
 
     def _layer_factors(self, layer, q, p, coords, frame):
