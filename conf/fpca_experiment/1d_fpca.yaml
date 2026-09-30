@@ -50,6 +50,7 @@ grad_accumulation_steps: 4
 max_grad_norm: 1.0
 
 # Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
+# Step cost scales with K * N * C; see conf/fpca.yaml before raising it.
 num_atoms: 64
 rank: 30            # R mixing tokens: the first R prefix atoms build each layer's rotation
 

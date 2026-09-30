@@ -47,7 +47,8 @@ checkpointing:
 
 
 # Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
-num_atoms: 4096
+# Step cost scales with K * N * C; see conf/fpca.yaml before raising it.
+num_atoms: 512
 rank: 10            # R mixing tokens: the first R prefix atoms build each layer's rotation
 n_epochs: 6000
 n_epochs_mean_function: null  # freeze mean function after this many epochs (null = never)

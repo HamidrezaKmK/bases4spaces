@@ -60,6 +60,7 @@ mean_function_optimizer_callable:
 
 # ── Prefix basis ──────────────────────────────────────────────────────────────
 # Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
+# Step cost scales with K * N * C; see conf/fpca.yaml before raising it.
 num_atoms: 128
 rank: 20            # R mixing tokens: the first R prefix atoms build each layer's rotation
 
