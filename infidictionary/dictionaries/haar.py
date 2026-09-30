@@ -2,7 +2,6 @@
 
 from typing import Iterator
 
-import math
 import torch
 import torch.nn as nn
 from torch.nn.utils.parametrizations import orthogonal
@@ -169,22 +168,6 @@ class HaarWaveletDictionary(InfiDictionary):
             rows.append(self._level_indices(j))
             j += 1
         return torch.cat(rows, dim=0) if rows else torch.empty((0, self._index_width), dtype=torch.long)
-
-    def sample_indices(self, num_samples: int, with_replacement: bool = True) -> torch.Tensor:
-        if not with_replacement:
-            raise NotImplementedError("without-replacement sampling is undefined for the infinite Haar prior")
-        scaling = torch.rand(num_samples) < self.scaling_mass
-        result = torch.zeros(num_samples, self._index_width, dtype=torch.long)
-        result[:, 0] = -1
-        result[:, -1] = torch.randint(self.num_channels, (num_samples,))
-        rows = (~scaling).nonzero(as_tuple=False).flatten()
-        if rows.numel():
-            level = torch.floor(torch.log1p(-torch.rand(rows.numel())) / math.log(self.level_decay)).long()
-            result[rows, 0] = level
-            for axis in range(self.domain_dim):
-                result[rows, 1 + axis] = (torch.rand(rows.numel()) * (2 ** level)).long()
-            result[rows, -2] = torch.randint(1, 2 ** self.domain_dim, (rows.numel(),))
-        return result
 
     def parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
         return iter(()) if not self.learn_synthesis or self._synthesis is None else super().parameters(recurse=recurse)

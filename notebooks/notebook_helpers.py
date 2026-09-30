@@ -608,7 +608,7 @@ def plot_spectral_compactness(
     return fig, (ax_l, ax_r)
 
 
-# ── Eulerian-isometry tutorial helpers ──────────────────────────────────
+# ── Sequence-mixer isometry tutorial helpers ────────────────────────────
 
 def plot_signal_1d(x, values, label: str | None = None, title: str | None = None, ax=None):
     """Plot a scalar field over a one-dimensional domain."""
@@ -647,58 +647,45 @@ def show_scalar_2d(ax, xy, values, gridsize: int = 30, title: str | None = None,
     return plot
 
 
-def visualize_generator_U(
+def visualize_mixing_layers(
     isometry,
     coords_vis,
-    *args,
+    layers=None,
+    *,
     channel: int = 0,
     trunc: int = 5,
     gridsize: int = 30,
-    **_ignored,
 ):
-    """Visualize the Eulerian generator and its finite orthogonal rotation.
+    """Visualize each mixing layer: the functions ``u_r`` and the causal attention ``A``.
 
-    Accepts the tutorial call shape ``(isometry, coords, timesteps, device)``
-    and the legacy FPCA notebook shape ``(isometry, coords, N_vis, timesteps,
-    device)``.  The latter's grid-size argument is unused for irregular grids.
+    One column per layer in ``layers`` (default: all). Rows ``0..trunc-1`` are
+    the mixing functions ``u_r^(ℓ)`` on ``coords_vis``; the last row is the
+    lower-triangular attention matrix ``A^(ℓ)`` that forms ``a_r = Σ_k A_rk e_k``.
     """
-    if len(args) == 2:
-        timesteps, device = args
-    elif len(args) == 3:
-        _, timesteps, device = args
-    else:
-        raise TypeError("expected timesteps and device, optionally preceded by N_vis")
-
+    with torch.no_grad():
+        states = isometry.layer_states(coords_vis)
+    layers = list(range(len(states))) if layers is None else list(layers)
     rank = min(isometry.rank, trunc)
     selected_channel = min(channel, isometry.channels_dim - 1)
-    n_points = coords_vis.shape[0]
     fig, axes = plt.subplots(
-        rank + 1, len(timesteps), figsize=(4 * len(timesteps), 4 * (rank + 1)),
+        rank + 1, len(layers), figsize=(4 * len(layers), 4 * (rank + 1)),
         squeeze=False, gridspec_kw={"hspace": 0.5, "wspace": 0.5},
     )
-    with torch.no_grad():
-        for column, time_value in enumerate(timesteps):
-            time_batch = torch.full(
-                (n_points,), float(time_value), device=device, dtype=coords_vis.dtype,
-            )
-            embedding = isometry.time_embedding(time_batch)
-            field = isometry.function_field(embedding, coords_vis)[:, :rank]
-            matrix = isometry._compute_kr(embedding[:1])[0]
-            rotation = torch.matrix_exp(matrix - matrix.transpose(-1, -2))
-            for row in range(rank):
-                axis = axes[row, column]
-                values = field[:, row, selected_channel]
-                if coords_vis.shape[-1] == 1:
-                    plot_signal_1d(coords_vis[:, 0], values, ax=axis,
-                                   title=f"u_{row}, channel {selected_channel}, t={float(time_value):.2f}")
-                else:
-                    image = show_scalar_2d(axis, coords_vis, values, gridsize=gridsize,
-                                           title=f"u_{row}, channel {selected_channel}, t={float(time_value):.2f}")
-                    plt.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
-            image = axes[rank, column].imshow(
-                rotation.detach().cpu().float().numpy(), cmap="coolwarm", vmin=-1, vmax=1,
-            )
-            plt.colorbar(image, ax=axes[rank, column], fraction=0.046, pad=0.04)
-            axes[rank, column].set_title(f"exp(K - Kᵀ), t={float(time_value):.2f}")
-    fig.suptitle("Generator columns and finite orthogonal rotation", fontsize=11)
+    for column, layer in enumerate(layers):
+        attention, field = states[layer]
+        for row in range(rank):
+            axis = axes[row, column]
+            values = field[:, row, selected_channel]
+            title = f"u_{row}, channel {selected_channel}, layer {layer + 1}"
+            if coords_vis.shape[-1] == 1:
+                plot_signal_1d(coords_vis[:, 0], values, ax=axis, title=title)
+            else:
+                image = show_scalar_2d(axis, coords_vis, values, gridsize=gridsize, title=title)
+                plt.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
+        image = axes[rank, column].imshow(
+            attention.detach().cpu().float().numpy(), cmap="viridis", vmin=0, vmax=1,
+        )
+        plt.colorbar(image, ax=axes[rank, column], fraction=0.046, pad=0.04)
+        axes[rank, column].set_title(f"attention A, layer {layer + 1}")
+    fig.suptitle("Mixing functions and causal attention per layer", fontsize=11)
     plt.show()

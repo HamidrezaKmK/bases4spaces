@@ -16,7 +16,7 @@ from infidictionary.dictionaries.base import InfiDictionary
 from infidictionary.datasets import IrregularDataset
 from infidictionary.neural_isometries import NeuralIsometry
 from infidictionary.networks import NeuralField
-from infidictionary.utils import isometry_defect
+from infidictionary.utils import isometry_defect, prefix_captured_energy
 from training_utils import get_grad_norm, get_param_norm, get_avg_lr, step_scheduler
 
 # Add resolver for hydra
@@ -40,9 +40,7 @@ def train(
     wandb_enabled: bool,
     grad_accumulation_steps: int,
     n_epochs_mean_function: int | None,
-    energy_estimation_kwargs: dict,
-    model_state_kwargs: dict,
-    pullback_pushforward_kwargs: dict,
+    num_atoms: int,
     checkpointer: Checkpointer | None,
     checkpoint: dict | None,
     max_grad_norm: float | None = None,
@@ -53,6 +51,11 @@ def train(
     # module; leaving it on CPU here restores its momentum buffers on CPU and
     # later conflicts with CUDA parameters after atom evaluation.
     initial_dictionary = initial_dictionary.to(device)
+
+    # The fixed, ordered K-prefix e_1..e_K pushed through the isometry every step,
+    # and the PMF weights of its captured energy.
+    prefix_idx = initial_dictionary.get_top_indices(num_atoms).to(device)
+    prefix_pmfs = initial_dictionary.get_index_pmfs(prefix_idx).to(device)
 
     optim_isometry.zero_grad()
     optim_mean_function.zero_grad()
@@ -74,7 +77,6 @@ def train(
         mean_function_frozen = n_epochs_mean_function is not None and epoch_i >= n_epochs_mean_function
         f_gen.reset_buffer()
         for micro_step in range(grad_accumulation_steps):
-            neural_isometry.shuffle_model_state(**model_state_kwargs)
             coords, vals = f_gen.get_batch(batch_size)
             coords = coords.to(device)  # shape (N, d)
             vals = vals.to(device)      # shape (B, N, C)
@@ -86,28 +88,20 @@ def train(
                 (mean_mse / grad_accumulation_steps).backward(retain_graph=False)
             mean_function_mse_history_temp.append(mean_mse.item())
 
-            # (2: covariance training) zero-center the data and do KL expansion step:
-            # get the vals centered and work with them
+            # (2: covariance training) push the prefix through the isometry and
+            # score the zero-centered data by its PMF-weighted captured energy.
             vals_centered = (vals - avg_vals.unsqueeze(0)).detach()  # shape (B, N, C)
-            src_coords, src_logabsdet, vals_pulled_back = neural_isometry.pullback(
-                tgt_coords=coords,
-                tgt_logabsdet=torch.zeros(coords.shape[0], device=coords.device),
-                tgt_field=vals_centered,
-                **pullback_pushforward_kwargs,
-            )
-            # Tripwire: the pullback must preserve the weighted L² norm. If it
+            logabsdet = torch.zeros(coords.shape[0], device=coords.device)
+            atoms_initial = initial_dictionary.get_atoms(coords, prefix_idx)  # (K, N, C)
+            _, _, atoms = neural_isometry.pushforward(coords, logabsdet, atoms_initial)
+            # Tripwire: the pushforward must preserve the weighted L² norm. If it
             # stops doing so the energy objective can win by amplifying rather
             # than by learning, which the energy curve alone will not reveal.
             # Only the last micro-batch's value is logged, so only it is computed.
             if wandb_enabled and micro_step == grad_accumulation_steps - 1:
-                isometry_ratio = isometry_defect(vals_centered, vals_pulled_back.detach())
+                isometry_ratio = isometry_defect(atoms_initial.detach(), atoms.detach())
 
-            energy = initial_dictionary.monte_carlo_captured_energy(
-                coords=src_coords,
-                logabsdet=src_logabsdet,
-                values=vals_pulled_back,
-                **energy_estimation_kwargs,
-            ).mean()
+            energy = prefix_captured_energy(vals_centered, atoms, prefix_pmfs, logabsdet).mean()
 
             (-energy / grad_accumulation_steps).backward(retain_graph=False)
             energy_history_temp.append(energy.item())
@@ -251,9 +245,7 @@ def main(conf: DictConfig):
             neural_isometry=neural_isometry,
             mean_function=mean_function,
             initial_dictionary=initial_dictionary,
-            energy_estimation_kwargs=conf.get("energy_estimation_kwargs", {}) or {},
-            model_state_kwargs=conf.get("model_state_kwargs", {}) or {},
-            pullback_pushforward_kwargs=conf.get("pullback_pushforward_kwargs", {}) or {},
+            num_atoms=conf.num_atoms,
             f_gen=function_generator,
             batch_size=conf.batch_size,
             n_epochs=conf.n_epochs,

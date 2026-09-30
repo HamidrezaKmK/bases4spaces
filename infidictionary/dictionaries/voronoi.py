@@ -263,21 +263,6 @@ class VoronoiPWC(InfiDictionary):
         vals = W_rows[:, col].reshape(A, N, C)                # (A, N, C)
         return vals * amp[None, :, None]
 
-    def sample_indices(
-        self,
-        num_samples: int,
-        with_replacement: bool = True,
-    ) -> torch.Tensor:
-        """Sample output-atom indices ``a`` ∝ the per-atom PMF ``probs[a]``.
-
-        The finite ``num_atoms`` support lets a single :func:`torch.multinomial`
-        draw handle both modes; ``with_replacement=False`` requires
-        ``num_samples <= num_atoms``.  Returns ``(num_samples, 2)`` with the
-        atom index in column 0 and zeros in column 1 (channel slot, unused).
-        """
-        a = torch.multinomial(self._probs, num_samples, replacement=with_replacement)
-        return torch.stack([a, torch.zeros_like(a)], dim=-1)  # (num_samples, 2)
-
     def get_index_pmfs(self, idx: torch.Tensor) -> torch.Tensor:
         """Per-atom PMF ``probs[a]``; ``0`` for indices outside ``[0, num_atoms)``."""
         a = idx[:, 0]

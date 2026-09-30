@@ -14,75 +14,139 @@ from infidictionary.neural_isometries import (
     EulerianIsometry,
 )
 from infidictionary.networks import NerfConditionalField, NerfNeuralField
-from infidictionary.utils import isometry_defect, pairwise_inner_product
+from infidictionary.utils import isometry_defect, pairwise_inner_product, prefix_captured_energy
 
 
-def _eulerian(**kwargs):
+def _eulerian(rank=4, num_layers=3):
+    torch.manual_seed(0)
     iso = EulerianIsometry(
-        1, 1, 4, 10.0, lambda **kw: NerfConditionalField(**kw), **kwargs
-    )
-    iso.shuffle_model_state(num_steps=8)
+        1, 1, rank, num_layers, lambda **kw: NerfConditionalField(hidden_dims=(32,), **kw)
+    ).double()
     iso.eval()
     return iso
 
 
-def test_eulerian_pushforward_preserves_the_l2_norm():
-    # The defining property: the flow is orthogonal, so the weighted L² norm is
-    # unchanged. This is what silently broke when the solve was approximated.
-    torch.manual_seed(0)
+def _prefix(num_atoms, n_points=64):
+    torch.manual_seed(1)
+    dictionary = FourierDictionary(domain_dim=1, num_channels=1)
+    coords = torch.rand(n_points, 1)
+    atoms = dictionary.get_atoms(coords, dictionary.get_top_indices(num_atoms))
+    return coords.double(), torch.zeros(n_points, dtype=torch.float64), atoms.double()
+
+
+def test_eulerian_pushforward_preserves_the_gram_matrix():
+    # The defining property: every layer is an exact Cayley rotation, so the
+    # Gram matrix of the prefix is unchanged, not merely penalized toward it.
     iso = _eulerian()
-    coords, lad, f = torch.rand(64, 1), torch.zeros(64), torch.randn(3, 64, 1)
+    coords, lad, atoms = _prefix(9)
     with torch.no_grad():
-        _, _, out = iso.pushforward(coords, lad, f, 0.0, 1.0)
-    assert isometry_defect(f, out, lad) == pytest.approx(1.0, abs=1e-3)
+        _, _, out = iso.pushforward(coords, lad, atoms)
+    assert not torch.allclose(out, atoms, atol=1e-2)  # it actually moved
+    assert torch.allclose(
+        pairwise_inner_product(out, out, lad), pairwise_inner_product(atoms, atoms, lad), atol=1e-10
+    )
+    assert isometry_defect(atoms, out, lad) == pytest.approx(1.0, abs=1e-10)
 
 
-def test_substepping_leaves_small_steps_untouched_and_preserves_isometry_on_large():
-    # A generous tolerance must be an exact no-op in the normal regime, and a
-    # tight one must still return an isometry — Cayley is orthogonal at any step.
-    torch.manual_seed(0)
-    coords, lad, f = torch.rand(64, 1), torch.zeros(64), torch.randn(2, 64, 1)
-
-    loose = _eulerian(substep_tol=1e6)
-    tight = _eulerian(substep_tol=0.05)
-    tight.load_state_dict(loose.state_dict())
-    tight.tspan = loose.tspan
-    loose.pop_diagnostics(), tight.pop_diagnostics()  # enable collection
-
+def test_pullback_inverts_pushforward_on_arbitrary_functions():
+    iso = _eulerian()
+    coords, lad, atoms = _prefix(6)
+    f = torch.randn(3, coords.shape[0], 1, dtype=torch.float64)
     with torch.no_grad():
-        _, _, out_loose = loose.pushforward(coords, lad, f, 0.0, 1.0)
-        _, _, out_tight = tight.pushforward(coords, lad, f, 0.0, 1.0)
-
-    assert loose.pop_diagnostics()["max_substeps_used"] == 1   # no-op
-    assert tight.pop_diagnostics()["max_substeps_used"] > 1    # actually split
-    assert isometry_defect(f, out_loose, lad) == pytest.approx(1.0, abs=1e-3)
-    assert isometry_defect(f, out_tight, lad) == pytest.approx(1.0, abs=1e-3)
-
-
-def test_pullback_inverts_pushforward_under_substepping():
-    # Substepping is chosen from a norm, so both directions pick the same split
-    # and remain exact inverses.
-    torch.manual_seed(0)
-    iso = _eulerian(substep_tol=0.1)
-    coords, lad, f = torch.rand(64, 1), torch.zeros(64), torch.randn(2, 64, 1)
+        _, _, pushed_atoms = iso.pushforward(coords, lad, atoms)
+        _, _, pulled_atoms = iso.pullback(coords, lad, pushed_atoms, frame=atoms)
+        _, _, pulled = iso.pullback(coords, lad, f, frame=atoms)
+    assert torch.allclose(pulled_atoms, atoms, atol=1e-10)
     with torch.no_grad():
-        _, _, fwd = iso.pushforward(coords, lad, f, 0.0, 1.0)
-        _, _, back = iso.pullback(coords, lad, fwd, 0.0, 1.0)
-    assert torch.allclose(back, f, atol=1e-3)
+        _, _, pushed_back = iso.pushforward(coords, lad, pulled, frame=atoms)
+        _, _, pushed_tail = iso.pushforward(coords, lad, atoms[3:], frame=atoms)
+    assert torch.allclose(pushed_back, f, atol=1e-10)
+    assert torch.allclose(pushed_tail, pushed_atoms[3:], atol=1e-12)
+    # <Q e_k, f> = <e_k, Q^{-1} f>: pulling data back is the adjoint of pushing atoms.
+    assert torch.allclose(
+        pairwise_inner_product(f, pushed_atoms, lad), pairwise_inner_product(pulled, atoms, lad), atol=1e-10
+    )
+
+
+def test_eulerian_is_prefix_faithful():
+    # Appending further functions to the prefix must not change the first K outputs.
+    iso = _eulerian()
+    coords, lad, atoms = _prefix(9)
+    with torch.no_grad():
+        _, _, short = iso.pushforward(coords, lad, atoms[:5])
+        _, _, long = iso.pushforward(coords, lad, atoms)
+    assert torch.allclose(long[:5], short, atol=1e-12)
+
+
+def test_eulerian_requires_at_least_rank_functions():
+    iso = _eulerian(rank=4)
+    coords, lad, atoms = _prefix(3)
+    with pytest.raises(AssertionError, match="K >= R"):
+        iso.pushforward(coords, lad, atoms)
+    with pytest.raises(AssertionError, match="K >= R"):
+        iso.pullback(coords, lad, atoms, frame=atoms)
+
+
+def test_mixing_attention_is_causal():
+    iso = _eulerian(rank=5)
+    q, p = iso._initial_tokens()
+    A = iso.layers[0].attention(q, p)
+    assert torch.equal(A, A.tril())
+    assert torch.allclose(A[0], torch.eye(5, dtype=A.dtype)[0])
+    assert torch.allclose(A.sum(dim=-1), torch.ones(5, dtype=A.dtype))
+
+
+def test_partial_pushforward_applies_only_the_requested_layers():
+    iso = _eulerian(num_layers=3)
+    coords, lad, atoms = _prefix(6)
+    with torch.no_grad():
+        _, _, none = iso.pushforward(coords, lad, atoms, num_layers_to_apply=0)
+        _, _, all_layers = iso.pushforward(coords, lad, atoms, num_layers_to_apply=3)
+        _, _, full = iso.pushforward(coords, lad, atoms)
+    assert torch.equal(none, atoms)
+    assert torch.equal(all_layers, full)
 
 
 def test_diagnostics_are_opt_in_and_reported_after_first_pop():
-    torch.manual_seed(0)
     iso = _eulerian()
-    coords, lad, f = torch.rand(64, 1), torch.zeros(64), torch.randn(2, 64, 1)
+    coords, lad, atoms = _prefix(6)
     with torch.no_grad():
-        iso.pushforward(coords, lad, f, 0.0, 1.0)
+        iso.pushforward(coords, lad, atoms)
     assert iso.pop_diagnostics() == {}          # collection off until first ask
     with torch.no_grad():
-        iso.pushforward(coords, lad, f, 0.0, 1.0)
+        iso.pushforward(coords, lad, atoms)
     diag = iso.pop_diagnostics()
-    assert {"cond_msys", "min_eig_gram", "max_substeps_used"} <= diag.keys()
+    assert {"cond_msys", "min_eig_gram"} <= diag.keys()
     assert iso.pop_diagnostics() == {}          # cleared by the previous pop
+
+
+@pytest.mark.parametrize(
+    "dictionary",
+    [
+        FourierDictionary(domain_dim=2, num_channels=3, steepness=2.0),
+        HaarWaveletDictionary(domain_dim=1, num_channels=1),
+        VoronoiPWC(resolution=10, dimension=1, num_channels=1, learn_synthesis=False),
+    ],
+    ids=["fourier", "haar", "voronoi"],
+)
+def test_top_indices_are_the_highest_pmf_atoms_in_order(dictionary):
+    idx = dictionary.get_top_indices(8)
+    pmfs = dictionary.get_index_pmfs(idx)
+    assert idx.shape[0] == 8
+    assert torch.all(pmfs[:-1] >= pmfs[1:])
+    # Nothing outside the prefix beats its smallest PMF.
+    candidates = dictionary.get_high_probability_indices(float(pmfs[-1]) * 0.999)
+    assert int((dictionary.get_index_pmfs(candidates) > pmfs[-1]).sum()) <= 8
+    assert torch.equal(dictionary.get_top_indices(8), idx)  # deterministic
+
+
+def test_prefix_captured_energy_is_pmf_weighted_squared_coefficients():
+    atoms = torch.eye(3)[:, :, None] * math.sqrt(3.0)   # orthonormal on 3 equally weighted points
+    values = torch.tensor([[1.0, 2.0, 0.0]])[:, :, None] * math.sqrt(3.0)
+    pmfs = torch.tensor([0.5, 0.25, 0.25])
+    energy = prefix_captured_energy(values, atoms, pmfs)
+    assert energy.shape == (1,)
+    assert energy.item() == pytest.approx(0.5 * 1.0 + 0.25 * 4.0)
 
 
 def test_real_multichannel_fourier_atoms_and_energy():
@@ -92,7 +156,8 @@ def test_real_multichannel_fourier_atoms_and_energy():
     assert atoms.shape[-1] == 3
     assert not atoms.is_complex()
     values = torch.rand(4, 64, 3)
-    energy = dictionary.monte_carlo_captured_energy(coords, torch.zeros(64), values, 8)
+    pmfs = dictionary.get_index_pmfs(dictionary.get_lowpass_indices(1))
+    energy = prefix_captured_energy(values, atoms, pmfs)
     assert energy.shape == (4,)
     assert not energy.is_complex()
     reconstruction = dictionary.get_reconstructions(coords, values, dictionary.get_lowpass_indices(1))
@@ -131,7 +196,8 @@ def test_shared_nerf_fields_are_real_and_differentiable():
     assert coords.grad is not None
 
 
-def test_chained_isometry_forwards_only_supported_state_and_time_arguments():
+def test_chained_isometry_forwards_the_frame_only_where_it_is_needed():
+    torch.manual_seed(0)
     chain = ChainedIsometry(
         coords_dim=1,
         channels_dim=2,
@@ -140,19 +206,24 @@ def test_chained_isometry_forwards_only_supported_state_and_time_arguments():
             partial(
                 EulerianIsometry,
                 rank=2,
-                base_acceleration=1.0,
-                scalar_field_partial=lambda **kwargs: NerfConditionalField(**kwargs),
+                num_layers=2,
+                scalar_field_partial=lambda **kwargs: NerfConditionalField(hidden_dims=(16,), **kwargs),
             ),
         ),
     )
-    chain.shuffle_model_state(num_steps=2)
-    assert chain.isometries[1]._num_steps == 2
-
-    coords, field = torch.rand(16, 1), torch.rand(3, 16, 2)
-    pushed = chain.pushforward(
-        coords, torch.zeros(16), field, rot_start_time=0.0, rot_end_time=1.0
+    coords, lad = torch.rand(16, 1), torch.zeros(16)
+    frame = FourierDictionary(domain_dim=1, num_channels=2).get_atoms(
+        coords, FourierDictionary(domain_dim=1, num_channels=2).get_top_indices(4)
     )
-    assert pushed[2].shape == field.shape
+    with torch.no_grad():
+        _, _, pushed = chain.pushforward(coords, lad, frame)
+        _, _, pulled = chain.pullback(coords, lad, pushed, frame=frame)
+        f = torch.randn(3, 16, 2)
+        _, _, f_pushed = chain.pushforward(coords, lad, f, frame=frame)
+        _, _, f_back = chain.pullback(coords, lad, f_pushed, frame=frame)
+    assert pushed.shape == frame.shape
+    assert torch.allclose(f_back, f, atol=1e-4)
+    assert torch.allclose(pulled, frame, atol=1e-4)
 
 
 def test_channel_mixer_starts_at_a_coordinate_independent_haar_rotation():
@@ -172,9 +243,10 @@ def test_real_eulerian_isometry_and_synthetic_dataset_batch():
     dataset = OneDimDiscontinuousGenerator(domain_sample_size=32, n_functions=16)
     coords, values = dataset.get_batch(3)
     assert coords.shape == (32, 1) and values.shape == (3, 32, 1)
-    isometry = EulerianIsometry(1, 1, 2, 1.0, lambda **kwargs: NerfConditionalField(**kwargs))
-    isometry.shuffle_model_state(num_steps=2)
-    _, _, moved = isometry.pullback(coords, torch.zeros(32), values, 0.0, 1.0)
+    isometry = EulerianIsometry(1, 1, 2, 2, lambda **kwargs: NerfConditionalField(**kwargs))
+    dictionary = FourierDictionary(domain_dim=1, num_channels=1)
+    frame = dictionary.get_atoms(coords, dictionary.get_top_indices(4))
+    _, _, moved = isometry.pullback(coords, torch.zeros(32), values, frame=frame)
     assert moved.shape == values.shape and not moved.is_complex()
 
 
@@ -212,7 +284,9 @@ def test_real_voronoi_atoms():
         torch.tensor([[0.0], [1.0]]), torch.ones(2), num_channels=2,
         learn_synthesis=False,
     )
-    atoms = dictionary.get_atoms(torch.rand(12, 1), dictionary.sample_indices(2, False))
+    coords = torch.rand(12, 1)
+    top = dictionary.get_top_indices(2)
+    atoms = dictionary.get_atoms(coords, top)
     assert atoms.shape == (2, 12, 2)
     assert not atoms.is_complex()
     indices = dictionary.get_high_probability_indices(0.0)
@@ -220,7 +294,8 @@ def test_real_voronoi_atoms():
     assert torch.isclose(pmfs.sum(), torch.tensor(1.0))
     assert torch.all(pmfs[:-1] > pmfs[1:])
     values = torch.rand(3, 12, 2)
-    assert dictionary.monte_carlo_captured_energy(torch.rand(12, 1), torch.zeros(12), values, 8).shape == (3,)
+    energy = prefix_captured_energy(values, atoms, dictionary.get_index_pmfs(top))
+    assert energy.shape == (3,)
 
 
 def test_fixed_voronoi_has_no_trainable_synthesis():

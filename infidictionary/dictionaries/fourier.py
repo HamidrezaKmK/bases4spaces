@@ -67,9 +67,7 @@ class FourierDictionary(InfiDictionary):
                 stacklevel=2,
             )
 
-        l2_w = self._precompute_l2_shell_weights()
-        self._Z_L2 = l2_w.sum().item()
-        self._l2_shell_cdf = (l2_w / self._Z_L2).cumsum(0)
+        self._Z_L2 = self._precompute_l2_shell_weights().sum().item()
 
         self._synthesis_indices = self.get_high_probability_indices(
             self.synthesis_tail_probability
@@ -165,34 +163,6 @@ class FourierDictionary(InfiDictionary):
 
         return W
 
-    def _sample_from_shells_l2(self, shells: torch.Tensor) -> torch.Tensor:
-        """Sample spatial indices from L-infinity shells with L2 power weights."""
-        S = shells.shape[0]
-        d = self.domain_dim
-        result = torch.zeros(S, d, dtype=torch.long, device=shells.device)
-        done = torch.zeros(S, dtype=torch.bool, device=shells.device)
-
-        while not done.all():
-            m = shells
-            cands = torch.zeros(S, d, dtype=torch.long, device=shells.device)
-            for dim in range(d):
-                r = torch.rand(S, device=shells.device)
-                cands[:, dim] = (r * (2 * m.float() + 1)).long() - m
-
-            on_shell = cands.abs().amax(dim=-1) == m
-            l2sq = cands.pow(2).sum(dim=-1).float()
-            m2 = m.float().pow(2)
-            ratio = torch.where(
-                m == 0,
-                torch.ones(S, device=shells.device),
-                ((1.0 + m2) / (1.0 + l2sq)).pow(self.steepness),
-            )
-            accept = on_shell & (torch.rand(S, device=shells.device) < ratio) & ~done
-            result[accept] = cands[accept]
-            done = done | accept
-
-        return result.cpu()
-
     # -- Coordinate and atom helpers --------------------------------------
 
     def _get_base_spatial_atoms(
@@ -252,24 +222,6 @@ class FourierDictionary(InfiDictionary):
         return torch.where(found, pos, torch.full_like(pos, -1))
 
     # -- Core dictionary methods ------------------------------------------
-
-    def sample_indices(
-        self,
-        num_samples: int,
-        with_replacement: bool = True,
-    ) -> torch.Tensor:
-        """Sample indices from the infinite power-law prior."""
-        if not with_replacement:
-            raise NotImplementedError(
-                "without-replacement sampling is undefined for the infinite "
-                "power-law prior"
-            )
-
-        u = torch.rand(num_samples)
-        shells = torch.searchsorted(self._l2_shell_cdf, u).clamp(0, self.m_max)
-        spatial = self._sample_from_shells_l2(shells)
-        channels = torch.randint(0, self.num_channels, (num_samples,))
-        return torch.cat([spatial, channels.unsqueeze(-1)], dim=-1)
 
     def get_atoms(
         self,

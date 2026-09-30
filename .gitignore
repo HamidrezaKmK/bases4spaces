@@ -10,6 +10,7 @@ slurm/run-*
 notebook_output*
 **/temp/**
 venv/
+.venv/
 .coverage*
 .env
 *.RData

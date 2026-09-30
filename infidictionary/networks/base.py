@@ -25,7 +25,7 @@ class ConditionalField(nn.Module, ABC):
     substitutability that does not exist.
 
     ``forward`` returns ``U`` of shape ``(N, R, C)``. ``cond_emb`` is
-    ``(N, emb_dim)``, pre-computed by the caller — a time embedding in
+    ``(N, emb_dim)``, pre-computed by the caller — a mixing-token embedding in
     ``EulerianIsometry`` — and broadcast across the ``N`` coordinates in ``x``.
     """
 

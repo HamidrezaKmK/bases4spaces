@@ -20,9 +20,9 @@ class InfiDictionary(nn.Module, ABC):
       step functions).
 
     Subclasses implement specific atom families and decide how the index set is
-    laid out, how atoms are evaluated, how indices are sampled from the PMF, and
-    what probability each index carries.  Everything beyond these three core
-    operations is dictionary-specific and lives on the subclass.
+    laid out, how atoms are evaluated, and what probability each index carries.
+    Everything beyond these core operations is dictionary-specific and lives on
+    the subclass.
 
     Atoms are evaluated at a finite set of *coordinates* (quadrature points) and
     are identified by integer *indices* whose meaning is dictionary-specific.
@@ -61,25 +61,6 @@ class InfiDictionary(nn.Module, ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def sample_indices(
-        self,
-        num_samples: int,
-        with_replacement: bool,
-    ) -> torch.Tensor:
-        """Draw atom indices according to the dictionary's PMF.
-
-        Args:
-            num_samples: Number of atom indices to draw.
-            with_replacement: If ``True``, draws are i.i.d. from the PMF and
-                may repeat.  If ``False``, the returned indices are distinct.
-
-        Returns:
-            Sampled indices, shape ``(num_samples, ...)`` matching the layout
-            of :meth:`get_atoms`'s ``idx`` argument.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def get_index_pmfs(self, idx: torch.Tensor) -> torch.Tensor:
         """Return the prior probability ``p(k)`` for each atom index.
 
@@ -96,37 +77,27 @@ class InfiDictionary(nn.Module, ABC):
         """Return every atom index with PMF at least ``tail_probability``."""
         raise NotImplementedError
 
-    def monte_carlo_captured_energy(
-        self,
-        coords: torch.Tensor,
-        logabsdet: torch.Tensor,
-        values: torch.Tensor,
-        num_tail_samples: int,
-        tail_probability: float = 1e-4,
-    ) -> torch.Tensor:
-        """Estimate captured energy using an exact PMF stratum and a sampled tail."""
-        idx_exact = self.get_high_probability_indices(tail_probability).to(coords.device)
-        atoms_exact = self.get_atoms(coords, idx_exact)
-        coeffs_exact = pairwise_inner_product(values, atoms_exact, logabsdet)
-        pmfs_exact = self.get_index_pmfs(idx_exact).to(coords.device)
-        energy_exact = (coeffs_exact.square() * pmfs_exact[None, :]).sum(dim=-1)
+    def get_top_indices(self, num_atoms: int) -> torch.Tensor:
+        """Return the ``num_atoms`` highest-PMF indices, ordered by descending PMF.
 
-        if num_tail_samples <= 0:
-            return energy_exact
-
-        idx_all = self.sample_indices(num_tail_samples, with_replacement=True).to(coords.device)
-        in_exact = (idx_all[:, None, :] == idx_exact[None, :, :]).all(dim=-1).any(dim=-1)
-        idx_tail = idx_all[~in_exact]
-        if idx_tail.numel() == 0:
-            return energy_exact
-
-        idx_tail, counts = torch.unique(idx_tail, return_counts=True, dim=0)
-        atoms_tail = self.get_atoms(coords, idx_tail)
-        coeffs_tail = pairwise_inner_product(values, atoms_tail, logabsdet)
-        energy_tail = (
-            coeffs_tail.square() * counts[None, :].to(coeffs_tail.dtype)
-        ).sum(dim=-1) / num_tail_samples
-        return energy_exact + energy_tail
+        This is the ordered prefix ``e_1, …, e_K`` that is fed through the
+        isometry. Ties keep the order of :meth:`get_high_probability_indices`
+        (the sort is stable), so the prefix is deterministic.
+        """
+        if num_atoms < 1:
+            raise ValueError(f"num_atoms must be >= 1; got {num_atoms}")
+        tail_probability = 1e-2
+        idx = self.get_high_probability_indices(tail_probability)
+        while idx.shape[0] < num_atoms:
+            if tail_probability < 1e-30:
+                raise ValueError(
+                    f"dictionary has fewer than num_atoms={num_atoms} atoms with non-zero PMF"
+                )
+            tail_probability /= 4
+            idx = self.get_high_probability_indices(tail_probability)
+        pmfs = self.get_index_pmfs(idx)
+        order = torch.sort(pmfs, descending=True, stable=True).indices
+        return idx[order[:num_atoms].to(idx.device)]
 
     def get_reconstructions(
         self,

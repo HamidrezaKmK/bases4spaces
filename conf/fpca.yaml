@@ -2,7 +2,6 @@ defaults:
   - neural_fields@mean_function: nerf_field
   - hydra: default
   - wandb: disabled # set to enabled for wandb logging
-  - /energy_estimation_kwargs@energy_estimation_kwargs: monte_carlo
   - /dictionaries@initial_dictionary: fourier_2d
   - _self_
   - override hydra/hydra_logging: none # hack to fix the logging code
@@ -21,9 +20,9 @@ isometry_optimizer_callable:
 isometry_scheduler_callable: null
 
 
-pullback_pushforward_kwargs:
-  rot_start_time: 0.0
-  rot_end_time: 1.0
+# Size K of the fixed, ordered dictionary prefix e_1..e_K pushed through the
+# isometry each step; its captured energy is weighted by the atom PMFs. K >= rank.
+num_atoms: 64
 
 wandb:
   tags:

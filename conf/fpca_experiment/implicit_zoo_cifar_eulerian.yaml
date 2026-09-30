@@ -32,9 +32,6 @@ ood_label: "CIFAR-10 eval split"
 neural_isometry:
   channels_dim: 3        # RGB: 3 output channels
   rank: 30
-  # Matches every other experiment. Keeping ½·Δt·a·‖G·A‖ < 1 is what keeps the
-  # R×R Woodbury solve well-conditioned; set `max_gen_norm` to bound ‖A‖ directly.
-  base_acceleration: 10.
 
 # ── Fourier dictionary: 3 channels (R, G, B) ──────────────────────────────────
 initial_dictionary:
@@ -44,14 +41,6 @@ initial_dictionary:
 # ── Mean function: 3-channel output ───────────────────────────────────────────
 mean_function:
   output_dim: 3
-
-# ── ODE integrator ────────────────────────────────────────────────────────────
-model_state_kwargs:
-  num_steps: 20
-
-pullback_pushforward_kwargs:
-  rot_start_time: 0.0
-  rot_end_time: 1.0
 
 # ── Training ──────────────────────────────────────────────────────────────────
 n_epochs: 1000
@@ -70,10 +59,9 @@ mean_function_optimizer_callable:
   lr: 1.0e-3
   _partial_: true
 
-# ── Energy estimation ─────────────────────────────────────────────────────────
-energy_estimation_kwargs:
-  num_tail_samples: 32
-  tail_probability: 1.0e-4
+# ── Prefix basis ──────────────────────────────────────────────────────────────
+# Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
+num_atoms: 512
 
 # ── Checkpointing ─────────────────────────────────────────────────────────────
 checkpointing:

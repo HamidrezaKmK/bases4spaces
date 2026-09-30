@@ -26,6 +26,17 @@ def norm2(
     return ret / f.shape[1]
 
 
+def prefix_captured_energy(
+    values: torch.Tensor,                   # (B, N, C)
+    atoms: torch.Tensor,                    # (K, N, C) the learned prefix basis
+    pmfs: torch.Tensor,                     # (K,)
+    logabsdet: torch.Tensor | None = None,  # (N,)
+) -> torch.Tensor:                          # (B,)
+    """PMF-weighted captured energy ``Σ_k p_k ⟨f, e_k⟩²`` over a fixed prefix."""
+    coeffs = pairwise_inner_product(values, atoms, logabsdet)
+    return (coeffs.square() * pmfs.to(coeffs)[None, :]).sum(dim=-1)
+
+
 def isometry_defect(
     src: torch.Tensor,                      # (B, N, C) before the map
     tgt: torch.Tensor,                      # (B, N, C) after the map

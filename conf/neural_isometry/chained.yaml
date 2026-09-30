@@ -1,7 +1,7 @@
 # A ChainedIsometry: composition Q = Q_2 ∘ Q_1 (Q_1 applied first on
 # pushforward, inverted last on pullback). Link 1 is a spatially-varying
-# channel-mixing orthogonal map; link 2 is an EulerianIsometry driven by a
-# conditional generator. Every hyperparameter is set explicitly
+# channel-mixing orthogonal map; link 2 is an EulerianIsometry (causal
+# sequence mixer). Every hyperparameter is set explicitly
 # here — nothing is left to a code default.
 #
 # Note: unlike `eulerian.yaml`, coords_dim / channels_dim are NOT top-level keys
@@ -22,15 +22,15 @@ isometries_partial:
       _target_: torch.nn.SiLU
       _partial_: true
 
-  # ── Link 2: Eulerian flow with a NeRF spatio-temporal generator ─────────────
+  # ── Link 2: causal sequence mixer with a NeRF mixing-function field ─────────
   - _target_: infidictionary.neural_isometries.EulerianIsometry
     _partial_: true
     rank: 10
-    base_acceleration: 5.0          # keeps ½·Δt·a·‖G·A‖ < 1, so the R×R Woodbury solve stays well-conditioned
+    num_layers: 8
+    d_model: 64
+    n_heads: 1
+    ffn_hidden: 128
     gradient_checkpointing: true
-    n_time_freqs: 256
-    kr_hidden_dims: [64, 64]
-    max_gen_norm: 1.0               # soft Frobenius cap on the skew-symmetric generator
     scalar_field_partial:
       _target_: infidictionary.networks.NerfConditionalField
       _partial_: true

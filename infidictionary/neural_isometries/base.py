@@ -42,14 +42,6 @@ class NeuralIsometry(ABC, torch.nn.Module):
         """
         pass
 
-    def train(self, mode: bool = True):
-        result = super().train(mode)
-        self.shuffle_model_state()
-        return result
-
-    def shuffle_model_state(self):
-        return self
-
     def pop_diagnostics(self) -> dict[str, float]:
         """Numerical diagnostics since the last call. Empty unless overridden."""
         return {}
@@ -59,13 +51,10 @@ class IdentityIsometry(NeuralIsometry):
     A toy neural isometry that does nothing, but is still an isometry. Useful for debugging and testing.
 
     Accepts and ignores any extra keyword arguments. Each concrete isometry takes
-    its own: ``EulerianIsometry`` requires ``rot_start_time``/``rot_end_time``,
-    ``ChannelOrthogonalIsometry`` takes none. Callers such as ``fpca.py`` splat one
-    ``pullback_pushforward_kwargs`` dict at whichever isometry is configured, so
-    swallowing the extras is what keeps the identity a drop-in stand-in for any of
-    them — the rotation times in particular mean nothing here, since there is no
-    rotation to schedule. (``ChainedIsometry`` solves the same problem per-link
-    with ``_filter_kwargs``.)
+    its own: ``EulerianIsometry.pullback`` requires the ``frame`` it was built
+    from, ``ChannelOrthogonalIsometry`` takes none. Swallowing the extras is what
+    keeps the identity a drop-in stand-in for any of them. (``ChainedIsometry``
+    solves the same problem per-link with ``_filter_kwargs``.)
     """
 
     def pushforward(
