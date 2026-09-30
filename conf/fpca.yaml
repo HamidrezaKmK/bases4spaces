@@ -2,7 +2,6 @@ defaults:
   - neural_fields@mean_function: nerf_field
   - hydra: default
   - wandb: disabled # set to enabled for wandb logging
-  - /energy_estimation_kwargs@energy_estimation_kwargs: monte_carlo
   - /dictionaries@initial_dictionary: fourier_2d
   - _self_
   - override hydra/hydra_logging: none # hack to fix the logging code
@@ -21,9 +20,16 @@ isometry_optimizer_callable:
 isometry_scheduler_callable: null
 
 
-pullback_pushforward_kwargs:
-  rot_start_time: 0.0
-  rot_end_time: 1.0
+# Size K of the fixed, ordered dictionary prefix e_1..e_K pushed through the
+# isometry each step; the objective is the data's PMF-weighted energy on it. K >= rank.
+# Cost: every step pushes a (K, N, C) tensor through all layers (and again in
+# the backward pass), so step time grows linearly with K * N * C. The PMF
+# weights decay fast, so a few hundred atoms carry most of the objective; keep
+# K modest (hundreds, not thousands) for high-resolution data.
+num_atoms: 64
+# Number R of mixing tokens: the first R prefix atoms build each layer's rotation.
+# It is a call argument of the isometry, not part of the model.
+rank: 10
 
 wandb:
   tags:

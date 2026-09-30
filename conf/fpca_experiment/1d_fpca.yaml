@@ -38,15 +38,10 @@ mean_function:
   coords_dim: 1
   output_dim: 1
 
-# ── Neural isometry (1-D, rank-30 Eulerian) ──────────────────────────────────
+# ── Neural isometry (1-D Eulerian) ─────────────────────────────────────────────
 neural_isometry:
   coords_dim: 1
   channels_dim: 1
-  rank: 30
-  base_acceleration: 10.
-
-model_state_kwargs:
-  num_steps: 20
 
 # ── Training ──────────────────────────────────────────────────────────────────
 n_epochs: 4000
@@ -54,9 +49,10 @@ batch_size: 16
 grad_accumulation_steps: 4
 max_grad_norm: 1.0
 
-energy_estimation_kwargs:
-  tail_probability: 0.001
-  num_tail_samples: 16
+# Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
+# Step cost scales with K * N * C; see conf/fpca.yaml before raising it.
+num_atoms: 64
+rank: 30            # R mixing tokens: the first R prefix atoms build each layer's rotation
 
 checkpointing:
   checkpoint_dir: outputs/checkpoints

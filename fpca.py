@@ -16,7 +16,7 @@ from infidictionary.dictionaries.base import InfiDictionary
 from infidictionary.datasets import IrregularDataset
 from infidictionary.neural_isometries import NeuralIsometry
 from infidictionary.networks import NeuralField
-from infidictionary.utils import isometry_defect
+from infidictionary.utils import isometry_defect, prefix_weighted_energy
 from training_utils import get_grad_norm, get_param_norm, get_avg_lr, step_scheduler
 
 # Add resolver for hydra
@@ -40,19 +40,21 @@ def train(
     wandb_enabled: bool,
     grad_accumulation_steps: int,
     n_epochs_mean_function: int | None,
-    energy_estimation_kwargs: dict,
-    model_state_kwargs: dict,
-    pullback_pushforward_kwargs: dict,
+    num_atoms: int,
+    rank: int,
     checkpointer: Checkpointer | None,
     checkpoint: dict | None,
     max_grad_norm: float | None = None,
 ):
     neural_isometry = neural_isometry.to(device)
     mean_function = mean_function.to(device)
-    # Dictionaries such as Fourier/Haar/Voronoi can own a learned synthesis
-    # module; leaving it on CPU here restores its momentum buffers on CPU and
-    # later conflicts with CUDA parameters after atom evaluation.
     initial_dictionary = initial_dictionary.to(device)
+
+    # The fixed, ordered K-prefix e_1..e_K pushed through the isometry every step,
+    # and the PMF weights of its energy objective. The first R of them build the
+    # rotations, so the prefix must be at least R long.
+    assert num_atoms >= rank, f"num_atoms (K={num_atoms}) must be >= rank (R={rank})"
+    prefix_pmfs = initial_dictionary.get_prefix_pmfs(num_atoms).to(device)
 
     optim_isometry.zero_grad()
     optim_mean_function.zero_grad()
@@ -74,7 +76,6 @@ def train(
         mean_function_frozen = n_epochs_mean_function is not None and epoch_i >= n_epochs_mean_function
         f_gen.reset_buffer()
         for micro_step in range(grad_accumulation_steps):
-            neural_isometry.shuffle_model_state(**model_state_kwargs)
             coords, vals = f_gen.get_batch(batch_size)
             coords = coords.to(device)  # shape (N, d)
             vals = vals.to(device)      # shape (B, N, C)
@@ -86,28 +87,20 @@ def train(
                 (mean_mse / grad_accumulation_steps).backward(retain_graph=False)
             mean_function_mse_history_temp.append(mean_mse.item())
 
-            # (2: covariance training) zero-center the data and do KL expansion step:
-            # get the vals centered and work with them
+            # (2: covariance training) push the prefix through the isometry and
+            # score the zero-centered data by its PMF-weighted energy on that prefix.
             vals_centered = (vals - avg_vals.unsqueeze(0)).detach()  # shape (B, N, C)
-            src_coords, src_logabsdet, vals_pulled_back = neural_isometry.pullback(
-                tgt_coords=coords,
-                tgt_logabsdet=torch.zeros(coords.shape[0], device=coords.device),
-                tgt_field=vals_centered,
-                **pullback_pushforward_kwargs,
-            )
-            # Tripwire: the pullback must preserve the weighted L² norm. If it
+            logabsdet = torch.zeros(coords.shape[0], device=coords.device)
+            atoms_initial = initial_dictionary.get_prefix(coords, num_atoms)  # (K, N, C)
+            _, _, atoms = neural_isometry.pushforward(coords, logabsdet, atoms_initial, rank=rank)
+            # Tripwire: the pushforward must preserve the weighted L² norm. If it
             # stops doing so the energy objective can win by amplifying rather
             # than by learning, which the energy curve alone will not reveal.
             # Only the last micro-batch's value is logged, so only it is computed.
             if wandb_enabled and micro_step == grad_accumulation_steps - 1:
-                isometry_ratio = isometry_defect(vals_centered, vals_pulled_back.detach())
+                isometry_ratio = isometry_defect(atoms_initial.detach(), atoms.detach())
 
-            energy = initial_dictionary.monte_carlo_captured_energy(
-                coords=src_coords,
-                logabsdet=src_logabsdet,
-                values=vals_pulled_back,
-                **energy_estimation_kwargs,
-            ).mean()
+            energy = prefix_weighted_energy(vals_centered, atoms, prefix_pmfs, logabsdet).mean()
 
             (-energy / grad_accumulation_steps).backward(retain_graph=False)
             energy_history_temp.append(energy.item())
@@ -127,8 +120,6 @@ def train(
             wandb.log({"train_stats/avg_lr_isometry": get_avg_lr(optim_isometry)}, step=epoch_i)
             # Numerical health of the isometry. isometry_ratio must stay at 1.0.
             wandb.log({"numerics/isometry_ratio": isometry_ratio}, step=epoch_i)
-            for name, value in neural_isometry.pop_diagnostics().items():
-                wandb.log({f"numerics/{name}": value}, step=epoch_i)
 
         pbar.set_postfix({'energy': energy_item, 'mean_function_mse': mean_mse_item})
         if max_grad_norm is not None:
@@ -209,11 +200,7 @@ def main(conf: DictConfig):
         isometry_scheduler_callable = instantiate(conf.isometry_scheduler_callable)
     else:
         isometry_scheduler_callable = None
-    isometry_and_dictionary_parameters = [
-        *neural_isometry.parameters(),
-        *initial_dictionary.parameters(),
-    ]
-    optim_isometry = isometry_optimizer_callable(isometry_and_dictionary_parameters)
+    optim_isometry = isometry_optimizer_callable(neural_isometry.parameters())
     scheduler_isometry = isometry_scheduler_callable(optim_isometry) if isometry_scheduler_callable is not None else None
 
     optim_mean_function = mean_function_optimizer_callable(mean_function.parameters())
@@ -242,7 +229,7 @@ def main(conf: DictConfig):
 
     if checkpoint is not None and "initial_dictionary" not in checkpoint.get("models", {}):
         raise ValueError(
-            "This checkpoint predates dictionary-synthesis checkpointing and cannot "
+            "This checkpoint predates dictionary checkpointing and cannot "
             "be resumed. Start a new FPCA run."
         )
 
@@ -251,9 +238,8 @@ def main(conf: DictConfig):
             neural_isometry=neural_isometry,
             mean_function=mean_function,
             initial_dictionary=initial_dictionary,
-            energy_estimation_kwargs=conf.get("energy_estimation_kwargs", {}) or {},
-            model_state_kwargs=conf.get("model_state_kwargs", {}) or {},
-            pullback_pushforward_kwargs=conf.get("pullback_pushforward_kwargs", {}) or {},
+            num_atoms=conf.num_atoms,
+            rank=conf.rank,
             f_gen=function_generator,
             batch_size=conf.batch_size,
             n_epochs=conf.n_epochs,

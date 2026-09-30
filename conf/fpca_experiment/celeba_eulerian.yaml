@@ -29,8 +29,6 @@ function_generator:
 neural_isometry:
   channels_dim: 3
   # scalar_field_partial: null
-  rank: 10
-  base_acceleration: 10.
 
 # Fourier dictionary: 3 output channels (R,G,B).  Atoms are indexed by
 # (k_1, k_2, c) — scalar spatial function phi_k active only in channel c.
@@ -43,18 +41,15 @@ mean_function:
   output_dim: 3
 
 # ── Training hyperparameters ──────────────────────────────────────────────────
-model_state_kwargs:
-  num_steps: 20 # NOTE: important to set to small value perhaps counterintuitively
-
-
 checkpointing:
   checkpoint_dir: outputs/checkpoints
   checkpoint_every_n_steps: 20
 
 
-energy_estimation_kwargs:
-  tail_probability: 0.00001
-  num_tail_samples: 32
+# Fixed ordered prefix e_1..e_K pushed through the isometry (K >= rank).
+# Step cost scales with K * N * C; see conf/fpca.yaml before raising it.
+num_atoms: 512
+rank: 10            # R mixing tokens: the first R prefix atoms build each layer's rotation
 n_epochs: 6000
 n_epochs_mean_function: null  # freeze mean function after this many epochs (null = never)
 batch_size: 16

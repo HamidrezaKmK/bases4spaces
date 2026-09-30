@@ -13,7 +13,7 @@ class ChannelOrthogonalIsometry(NeuralIsometry):
     Haar-random orthogonal matrix and ``A(x)`` is skew-symmetric.  The learned
     perturbation starts at zero, so ``Q(x) = Q₀`` exactly at initialization for
     every coordinate. Coordinates and log-abs-det weights pass through
-    unchanged, and pullback applies the transpose matrix.
+    unchanged.
     """
 
     def __init__(
@@ -64,16 +64,6 @@ class ChannelOrthogonalIsometry(NeuralIsometry):
         learned_rotation = torch.linalg.matrix_exp(A)
         return self.base_orthogonal.to(dtype=x.dtype, device=x.device)[None] @ learned_rotation
 
-    def _apply_orthogonal(
-        self,
-        coords: torch.Tensor,
-        logabsdet: torch.Tensor,
-        field: torch.Tensor,
-        Q: torch.Tensor,
-    ):
-        out = torch.einsum("nij,bnj->bni", Q.to(field.dtype), field)
-        return coords, logabsdet, out
-
     def pushforward(
         self,
         src_coords: torch.Tensor,
@@ -81,15 +71,5 @@ class ChannelOrthogonalIsometry(NeuralIsometry):
         src_field: torch.Tensor,
     ):
         Q = self._orthogonal(src_coords)
-        return self._apply_orthogonal(src_coords, src_logabsdet, src_field, Q)
-
-    def pullback(
-        self,
-        tgt_coords: torch.Tensor,
-        tgt_logabsdet: torch.Tensor,
-        tgt_field: torch.Tensor,
-    ):
-        Q = self._orthogonal(tgt_coords)
-        return self._apply_orthogonal(
-            tgt_coords, tgt_logabsdet, tgt_field, Q.transpose(-1, -2)
-        )
+        out = torch.einsum("nij,bnj->bni", Q.to(src_field.dtype), src_field)
+        return src_coords, src_logabsdet, out
