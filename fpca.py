@@ -16,7 +16,7 @@ from infidictionary.dictionaries.base import InfiDictionary
 from infidictionary.datasets import IrregularDataset
 from infidictionary.neural_isometries import NeuralIsometry
 from infidictionary.networks import NeuralField
-from infidictionary.utils import isometry_defect, prefix_captured_energy
+from infidictionary.utils import isometry_defect, prefix_weighted_energy
 from training_utils import get_grad_norm, get_param_norm, get_avg_lr, step_scheduler
 
 # Add resolver for hydra
@@ -51,7 +51,7 @@ def train(
     initial_dictionary = initial_dictionary.to(device)
 
     # The fixed, ordered K-prefix e_1..e_K pushed through the isometry every step,
-    # and the PMF weights of its captured energy. The first R of them build the
+    # and the PMF weights of its energy objective. The first R of them build the
     # rotations, so the prefix must be at least R long.
     assert num_atoms >= rank, f"num_atoms (K={num_atoms}) must be >= rank (R={rank})"
     prefix_pmfs = initial_dictionary.get_prefix_pmfs(num_atoms).to(device)
@@ -88,7 +88,7 @@ def train(
             mean_function_mse_history_temp.append(mean_mse.item())
 
             # (2: covariance training) push the prefix through the isometry and
-            # score the zero-centered data by its PMF-weighted captured energy.
+            # score the zero-centered data by its PMF-weighted energy on that prefix.
             vals_centered = (vals - avg_vals.unsqueeze(0)).detach()  # shape (B, N, C)
             logabsdet = torch.zeros(coords.shape[0], device=coords.device)
             atoms_initial = initial_dictionary.get_prefix(coords, num_atoms)  # (K, N, C)
@@ -100,7 +100,7 @@ def train(
             if wandb_enabled and micro_step == grad_accumulation_steps - 1:
                 isometry_ratio = isometry_defect(atoms_initial.detach(), atoms.detach())
 
-            energy = prefix_captured_energy(vals_centered, atoms, prefix_pmfs, logabsdet).mean()
+            energy = prefix_weighted_energy(vals_centered, atoms, prefix_pmfs, logabsdet).mean()
 
             (-energy / grad_accumulation_steps).backward(retain_graph=False)
             energy_history_temp.append(energy.item())

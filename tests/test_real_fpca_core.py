@@ -13,7 +13,13 @@ from infidictionary.neural_isometries import (
     EulerianIsometry,
 )
 from infidictionary.networks import NerfConditionalField, NerfNeuralField
-from infidictionary.utils import isometry_defect, pairwise_inner_product, prefix_captured_energy
+from infidictionary.utils import (
+    isometry_defect,
+    pairwise_inner_product,
+    nested_projection_energies,
+    prefix_weighted_energy,
+    project_onto_span,
+)
 
 
 R = 4  # default number of mixing tokens used below
@@ -114,7 +120,7 @@ def test_partial_pushforward_applies_only_the_requested_layers():
     ],
     ids=["fourier", "haar"],
 )
-def test_prefix_is_ordered_nested_and_orthonormal(dictionary):
+def test_prefix_is_ordered_and_nested(dictionary):
     coords = torch.rand(4096, dictionary.domain_dim, dtype=torch.float64)
     pmfs = dictionary.get_prefix_pmfs(12)
     assert pmfs.shape == (12,)
@@ -126,16 +132,56 @@ def test_prefix_is_ordered_nested_and_orthonormal(dictionary):
     short, long = dictionary.get_prefix(coords, 8), dictionary.get_prefix(coords, 12)
     assert torch.equal(long[:8], short)
     assert torch.equal(dictionary.get_prefix_pmfs(8), pmfs[:8])
-    # Orthonormal up to Monte-Carlo error of the uniform sample.
+    # Not an API requirement, but Fourier and Haar happen to be orthonormal
+    # (up to Monte-Carlo error of the uniform sample).
     gram = pairwise_inner_product(long, long)
     assert torch.allclose(gram, torch.eye(12, dtype=gram.dtype), atol=0.1)
 
 
-def test_prefix_captured_energy_is_pmf_weighted_squared_coefficients():
+def _gaussian_bumps(coords, num, width=0.08):
+    """A non-orthonormal prefix: overlapping Gaussian bumps at evenly spaced centers."""
+    centers = torch.linspace(0.1, 0.9, num, dtype=coords.dtype)
+    return torch.exp(-((coords[None, :, 0] - centers[:, None]) / width) ** 2)[..., None]
+
+
+def test_eulerian_preserves_the_gram_matrix_of_a_non_orthonormal_prefix():
+    # The isometry only needs a prefix, not an orthonormal one: whatever Gram
+    # matrix the bumps have is preserved exactly.
+    iso = _eulerian()
+    coords = torch.rand(256, 1, dtype=torch.float64)
+    lad = torch.zeros(256, dtype=torch.float64)
+    bumps = _gaussian_bumps(coords, 9)
+    gram = pairwise_inner_product(bumps, bumps, lad)
+    assert (gram - torch.diag(torch.diagonal(gram))).abs().max() > 1e-2  # truly overlapping
+    with torch.no_grad():
+        _, _, out = iso.pushforward(coords, lad, bumps, rank=R)
+    assert torch.allclose(pairwise_inner_product(out, out, lad), gram, atol=1e-10)
+
+
+def test_projection_onto_a_non_orthonormal_span_is_the_least_squares_fit():
+    coords = torch.rand(256, 1, dtype=torch.float64)
+    bumps = _gaussian_bumps(coords, 6)
+    f = torch.randn(3, 256, 1, dtype=torch.float64)
+    projection, energy = project_onto_span(f, bumps)
+    # The residual is orthogonal to every atom, and the energy is ‖Pf‖² <= ‖f‖².
+    residual = f - projection
+    assert pairwise_inner_product(residual, bumps).abs().max() < 1e-8
+    assert torch.allclose(energy, pairwise_inner_product(projection, projection).diagonal())
+    assert torch.all(energy <= pairwise_inner_product(f, f).diagonal() + 1e-12)
+    # Nested energies agree with a projection onto each prefix length.
+    nested = nested_projection_energies(f, bumps)
+    for k in (1, 3, 6):
+        assert torch.allclose(nested[:, k - 1], project_onto_span(f, bumps[:k])[1], atol=1e-10)
+    # A function in the span is reproduced exactly.
+    in_span = (torch.randn(2, 6, dtype=torch.float64) @ bumps.reshape(6, -1)).view(2, 256, 1)
+    assert torch.allclose(project_onto_span(in_span, bumps)[0], in_span, atol=1e-8)
+
+
+def test_prefix_weighted_energy_is_pmf_weighted_squared_coefficients():
     atoms = torch.eye(3)[:, :, None] * math.sqrt(3.0)   # orthonormal on 3 equally weighted points
     values = torch.tensor([[1.0, 2.0, 0.0]])[:, :, None] * math.sqrt(3.0)
     pmfs = torch.tensor([0.5, 0.25, 0.25])
-    energy = prefix_captured_energy(values, atoms, pmfs)
+    energy = prefix_weighted_energy(values, atoms, pmfs)
     assert energy.shape == (1,)
     assert energy.item() == pytest.approx(0.5 * 1.0 + 0.25 * 4.0)
 
@@ -147,7 +193,7 @@ def test_real_multichannel_fourier_atoms_and_energy():
     assert atoms.shape == (27, 64, 3)
     assert not atoms.is_complex()
     values = torch.rand(4, 64, 3)
-    energy = prefix_captured_energy(values, atoms, dictionary.get_prefix_pmfs(27))
+    energy = prefix_weighted_energy(values, atoms, dictionary.get_prefix_pmfs(27))
     assert energy.shape == (4,)
     assert not energy.is_complex()
 
@@ -227,7 +273,7 @@ def test_real_eulerian_isometry_and_synthetic_dataset_batch():
     isometry = EulerianIsometry(1, 1, 2, lambda **kwargs: NerfConditionalField(**kwargs))
     dictionary = FourierDictionary(domain_dim=1, num_channels=1)
     _, _, learned = isometry.pushforward(coords, torch.zeros(32), dictionary.get_prefix(coords, 4), rank=2)
-    energy = prefix_captured_energy(values, learned, dictionary.get_prefix_pmfs(4))
+    energy = prefix_weighted_energy(values, learned, dictionary.get_prefix_pmfs(4))
     assert learned.shape == (4, 32, 1) and energy.shape == (3,) and not learned.is_complex()
 
 

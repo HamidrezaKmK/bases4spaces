@@ -21,7 +21,7 @@ isometry_scheduler_callable: null
 
 
 # Size K of the fixed, ordered dictionary prefix e_1..e_K pushed through the
-# isometry each step; its captured energy is weighted by the atom PMFs. K >= rank.
+# isometry each step; the objective is the data's PMF-weighted energy on it. K >= rank.
 # Cost: every step pushes a (K, N, C) tensor through all layers (and again in
 # the backward pass), so step time grows linearly with K * N * C. The PMF
 # weights decay fast, so a few hundred atoms carry most of the objective; keep

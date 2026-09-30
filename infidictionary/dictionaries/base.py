@@ -7,12 +7,14 @@ import torch.nn as nn
 class InfiDictionary(nn.Module, ABC):
     """Abstract base class for infinite dictionaries over a continuous domain.
 
-    A dictionary is an infinite orthonormal family of *atoms* — scalar- or
-    vector-valued functions on a continuous domain — equipped with a
-    probability mass function (PMF) over its index set, e.g. the real Fourier
-    basis on ``[0,1]^d`` with a summable power-law prior over frequencies, or
-    the Haar wavelet basis with a geometric prior over levels. Dictionaries
-    are fixed: they own no learned parameters.
+    A dictionary is an infinite family of *atoms* — scalar- or vector-valued
+    functions on a continuous domain — equipped with a probability mass
+    function (PMF) over its index set, e.g. the real Fourier basis on
+    ``[0,1]^d`` with a summable power-law prior over frequencies, or the Haar
+    wavelet basis with a geometric prior over levels. The atoms need not be
+    orthonormal (Gaussian bumps at different centers would do): what the
+    isometry preserves is the Gram matrix of whatever prefix it is given.
+    Dictionaries are fixed: they own no learned parameters.
 
     A dictionary is only ever probed through its **ordered prefix**: the first
     ``K`` atoms ``e_1, …, e_K`` by descending PMF, via :meth:`get_prefix` and
